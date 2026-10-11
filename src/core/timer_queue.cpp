@@ -10,7 +10,9 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <forward_list>
+#include <thread>
 
 #include <disruptorplus/multi_threaded_claim_strategy.hpp>
 #include <disruptorplus/ring_buffer.hpp>
@@ -18,14 +20,70 @@
 #include <disruptorplus/spin_wait_strategy.hpp>
 
 #include <rex/assert.h>
+#include <rex/platform.h>
 #include <rex/thread.h>
 #include <rex/thread/timer_queue.h>
+
+#if REX_PLATFORM_WIN32
+#include "platform_win.h"
+#endif
 
 namespace dp = disruptorplus;
 
 namespace rex::thread {
 
 using WaitItem = TimerQueueWaitItem;
+
+namespace {
+
+// Sleeps for (approximately) the given duration with sub-millisecond precision,
+// without spinning. Returns false if that is not possible, in which case the
+// caller falls back to the spin wait.
+class PreciseSleeper {
+ public:
+  PreciseSleeper() {
+#if REX_PLATFORM_WIN32
+    // High-resolution waitable timers (Windows 10 1803+) do not depend on the
+    // process timer resolution (timeBeginPeriod).
+    timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                    TIMER_ALL_ACCESS);
+#endif
+  }
+  ~PreciseSleeper() {
+#if REX_PLATFORM_WIN32
+    if (timer_) {
+      CloseHandle(timer_);
+    }
+#endif
+  }
+  PreciseSleeper(const PreciseSleeper&) = delete;
+  PreciseSleeper& operator=(const PreciseSleeper&) = delete;
+
+  bool Sleep(std::chrono::nanoseconds duration) {
+#if REX_PLATFORM_WIN32
+    if (!timer_) {
+      return false;
+    }
+    LARGE_INTEGER due;
+    // Negative = relative, in 100 ns units.
+    due.QuadPart = -std::max<LONGLONG>(1, LONGLONG(duration.count() / 100));
+    if (!SetWaitableTimerEx(timer_, &due, 0, nullptr, nullptr, nullptr, 0)) {
+      return false;
+    }
+    return WaitForSingleObject(timer_, INFINITE) == WAIT_OBJECT_0;
+#else
+    std::this_thread::sleep_for(duration);
+    return true;
+#endif
+  }
+
+ private:
+#if REX_PLATFORM_WIN32
+  HANDLE timer_ = nullptr;
+#endif
+};
+
+}  // namespace
 
 class TimerQueue {
  public:
@@ -64,12 +122,31 @@ class TimerQueue {
 
     set_current_thread_name("rex::thread::TimerQueue");
 
+    // The spin wait strategy burns 0.1-0.2 ms of pause loops on every wait
+    // before even checking the timeout, and the 1 ms KeTimeStampBundle timer
+    // makes it wait 1000 times per second (12-15% of a core in practice).
+    // Instead, sleep until the next timer is due (at most 1 ms at a time, so a
+    // newly queued timer is noticed as quickly as the spin wait's own 1 ms
+    // sleeps would) and then poll the ring buffer without blocking.
+    constexpr auto kMaxSleep = std::chrono::milliseconds(1);
+    PreciseSleeper sleeper;
+    bool precise_sleep = true;
+
     while (!stop_token.stop_requested()) {
       {
         // Consume new wait items and add them to sorted wait queue
-        dp::sequence_t available = claim_strategy_.wait_until_published(
-            next_sequence, next_sequence - 1,
-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
+        dp::sequence_t available;
+        if (precise_sleep && !wait_queue_.empty()) {
+          auto remaining = wait_queue_.front()->due_ - clock::now();
+          if (remaining > clock::duration::zero()) {
+            precise_sleep = sleeper.Sleep(std::min<clock::duration>(remaining, kMaxSleep));
+          }
+          available = claim_strategy_.last_published_after(next_sequence - 1);
+        } else {
+          available = claim_strategy_.wait_until_published(
+              next_sequence, next_sequence - 1,
+              wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
+        }
 
         // Check for timeout
         if (available != next_sequence - 1) {

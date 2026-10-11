@@ -439,7 +439,17 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   if (!dialogs_.empty()) {
     // Repaint (and handle input) continuously if still active. In detached mode
     // there is no presenter; the app drives repaint via its own present loop.
-    if (presenter_) {
+    // Dialogs that are idle (always-registered notifications with nothing to
+    // show) don't count: otherwise the presenter repaints at the host refresh
+    // rate for the whole session even though the guest outputs 60 frames.
+    bool wants_continuous_paint = false;
+    for (ImGuiDialog* dialog : dialogs_) {
+      if (dialog->WantsContinuousPaint()) {
+        wants_continuous_paint = true;
+        break;
+      }
+    }
+    if (presenter_ && wants_continuous_paint) {
       presenter_->RequestUIPaintFromUIThread();
     }
   }

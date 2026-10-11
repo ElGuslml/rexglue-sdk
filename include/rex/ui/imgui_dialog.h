@@ -39,6 +39,13 @@ class ImGuiDialog {
 
   void Draw();
 
+  // Whether the dialog currently needs the UI to be repainted continuously
+  // (animation, input). A dialog that stays registered for the whole session
+  // but usually shows nothing (notifications) returns false while idle, so the
+  // presenter only paints when the guest output changes instead of at the host
+  // refresh rate.
+  virtual bool WantsContinuousPaint() { return true; }
+
  protected:
   ImGuiDialog(ImGuiDrawer* imgui_drawer);
 
