@@ -408,6 +408,8 @@ class D3D12CommandProcessor : public CommandProcessor {
   bool EndGuestOcclusionQuery(uint32_t sample_count_address,
                               xenos::xe_gpu_depth_sample_counts* sample_counts);
   bool AcquireOcclusionQueryIndex(uint32_t& host_index_out);
+  void CopyUsedFloatConstants(uint8_t* dst, const uint64_t* float_bitmap,
+                              uint32_t first_register) const;
   void DisableHostOcclusionQueries();
   uint64_t NormalizeOcclusionSamples(uint64_t samples) const;
   void WriteGuestOcclusionResult(xenos::xe_gpu_depth_sample_counts* sample_counts,
