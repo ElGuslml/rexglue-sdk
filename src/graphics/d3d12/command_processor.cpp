@@ -4003,6 +4003,30 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
   cbuffer_binding_system_.up_to_date &= !dirty;
 }
 
+// Perf: the constant buffer holds only the constants the shader uses, packed.
+// Copy each run of consecutive used constants with one memcpy instead of one 16-byte memcpy per
+// constant (GRAW re-uploads the constants of most of its ~7000 draws per frame).
+void D3D12CommandProcessor::CopyUsedFloatConstants(uint8_t* dst, const uint64_t* float_bitmap,
+                                                   uint32_t first_register) const {
+  const RegisterFile& regs = *register_file_;
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint64_t map = float_bitmap[i];
+    uint32_t first;
+    while (rex::bit_scan_forward(map, &first)) {
+      uint64_t inverted_from_first = ~(map >> first);
+      uint32_t run;
+      if (!rex::bit_scan_forward(inverted_from_first, &run)) {
+        run = 64 - first;
+      }
+      size_t bytes = size_t(run) * 4 * sizeof(float);
+      std::memcpy(dst, &regs[first_register + (i << 8) + (first << 2)], bytes);
+      dst += bytes;
+      uint64_t run_mask = run == 64 ? UINT64_MAX : ((UINT64_C(1) << run) - 1);
+      map &= ~(run_mask << first);
+    }
+  }
+}
+
 bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
                                            const D3D12Shader* pixel_shader,
                                            ID3D12RootSignature* root_signature,
@@ -4113,18 +4137,8 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
     if (float_constants == nullptr) {
       return false;
     }
-    for (uint32_t i = 0; i < 4; ++i) {
-      uint64_t float_constant_map_entry = float_constant_map_vertex.float_bitmap[i];
-      uint32_t float_constant_index;
-      while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-        float_constant_map_entry &= ~(1ull << float_constant_index);
-        std::memcpy(
-            float_constants,
-            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (float_constant_index << 2)],
-            4 * sizeof(float));
-        float_constants += 4 * sizeof(float);
-      }
-    }
+    CopyUsedFloatConstants(float_constants, float_constant_map_vertex.float_bitmap,
+                           XE_GPU_REG_SHADER_CONSTANT_000_X);
     cbuffer_binding_float_vertex_.up_to_date = true;
     current_graphics_root_up_to_date_ &= ~(1u << root_parameter_float_constants_vertex);
   }
@@ -4139,18 +4153,8 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
     if (pixel_shader != nullptr) {
       const Shader::ConstantRegisterMap& float_constant_map_pixel =
           pixel_shader->constant_register_map();
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry = float_constant_map_pixel.float_bitmap[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              float_constants,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (float_constant_index << 2)],
-              4 * sizeof(float));
-          float_constants += 4 * sizeof(float);
-        }
-      }
+      CopyUsedFloatConstants(float_constants, float_constant_map_pixel.float_bitmap,
+                             XE_GPU_REG_SHADER_CONSTANT_256_X);
     }
     cbuffer_binding_float_pixel_.up_to_date = true;
     current_graphics_root_up_to_date_ &= ~(1u << root_parameter_float_constants_pixel);
