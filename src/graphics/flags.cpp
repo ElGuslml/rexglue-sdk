@@ -21,6 +21,11 @@ REXCVAR_DEFINE_BOOL(gpu_depth_clamp, false, "GPU",
                     "range instead (D3D12 DepthClipEnable = FALSE). Xenos appears to behave this way: "
                     "555307D5 (GRAW) draws its sky dome 1.5x beyond its own far plane with "
                     "PA_CL_CLIP_CNTL.clip_disable = 0 and expects it to be visible");
+REXCVAR_DEFINE_BOOL(gpu_async_pipelines_no_frame_wait, false, "GPU",
+                    "With async_shader_compilation (D3D12): don't wait at the end of each frame for "
+                    "the pipelines still being created. Draws using them are already skipped until "
+                    "they are ready, so a new object appears a few frames later instead of the "
+                    "frame stalling for the whole creation (100-250 ms for a new pipeline)");
 REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
 REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
                     "Convert float24 depth in pixel shader");
