@@ -118,6 +118,12 @@ void Sleep(std::chrono::duration<Rep, Period> duration) {
   Sleep(std::chrono::duration_cast<std::chrono::microseconds>(duration));
 }
 
+// Sleeps for about the given duration with sub-millisecond precision, without
+// depending on the system timer resolution (Sleep() above rounds down to whole
+// milliseconds and wakes at the timer resolution). On Windows it uses a
+// per-thread high-resolution waitable timer, falling back to Sleep().
+void PreciseSleep(std::chrono::microseconds duration);
+
 enum class SleepResult {
   kSuccess,
   kAlerted,
