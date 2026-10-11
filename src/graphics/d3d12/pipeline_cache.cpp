@@ -763,6 +763,16 @@ void PipelineCache::EndSubmission() {
     pipeline_storage_file_flush_needed_ = false;
   }
   if (!creation_threads_.empty()) {
+    // With async_shader_compilation, D3D12CommandProcessor::IssueDraw skips the
+    // draws whose pipeline isn't created yet, so the submission never refers to
+    // a pipeline in creation (SetPipelineStateHandle is only recorded for
+    // created ones). Waiting here (or creating the leftovers on this thread)
+    // only stalls the frame for the whole creation - 100-250 ms for a new
+    // pipeline in 555307D5 (GRAW); leave them to the creation threads.
+    if (REXCVAR_GET(async_shader_compilation) &&
+        REXCVAR_GET(gpu_async_pipelines_no_frame_wait)) {
+      return;
+    }
     CreateQueuedPipelinesOnProcessorThread();
     // Await creation of all queued pipelines.
     bool await_creation_completion_event;
