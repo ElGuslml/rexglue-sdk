@@ -27,4 +27,5 @@ REXCVAR_DECLARE(bool, ignore_thread_affinities);
 REXCVAR_DECLARE(bool, writable_code_segments);
 REXCVAR_DECLARE(bool, protect_zero);
 REXCVAR_DECLARE(bool, protect_on_release);
+REXCVAR_DECLARE(bool, invalidate_physical_on_alloc);
 REXCVAR_DECLARE(bool, scribble_heap);

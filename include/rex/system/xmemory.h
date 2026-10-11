@@ -325,6 +325,10 @@ class PhysicalHeap : public BaseHeap {
  protected:
   bool IsHostPageWriteWatched(uint32_t host_page_number) const override;
 
+  // Invalidates the GPU-side copies of a newly allocated physical range (see the
+  // invalidate_physical_on_alloc cvar).
+  void InvalidateNewAllocation(uint32_t physical_address, uint32_t length);
+
   // Allocation on these heaps delegates to parent_heap_, whose own reconcile
   // pass takes the global critical region. Acquire whenever this heap or its
   // parent will need it, so the ordering holds even for a heap whose own guest
