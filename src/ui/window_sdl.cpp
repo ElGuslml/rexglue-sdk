@@ -40,6 +40,12 @@
 #include <rex/ui/surface_gnulinux.h>
 #endif
 
+// kHotReload like fullscreen: ApplyNewFullscreen re-applies the current mode.
+REXCVAR_DEFINE_BOOL(fullscreen_borderless_window, false, "UI/Window",
+                    "Make fullscreen a borderless window covering the display instead of SDL "
+                    "fullscreen (drivers treat it as a normal window: screenshots, alt-tab, "
+                    "overlays)");
+
 namespace rex::ui {
 
 namespace {
@@ -171,8 +177,7 @@ bool WindowSDL::OpenImpl() {
   }
 
   if (IsFullscreen()) {
-    // Borderless desktop fullscreen (a NULL display mode is SDL3's default).
-    SDL_SetWindowFullscreen(sdl_window_, true);
+    ApplyFullscreenState(true);
   }
 #if REX_PLATFORM_MAC
   CFPreferencesSetAppValue(CFSTR("ApplePressAndHoldEnabled"), kCFBooleanFalse,
@@ -295,7 +300,39 @@ void WindowSDL::ApplyNewFullscreen() {
   if (!sdl_window_) {
     return;
   }
-  SDL_SetWindowFullscreen(sdl_window_, IsFullscreen());
+  ApplyFullscreenState(IsFullscreen());
+}
+
+void WindowSDL::ApplyFullscreenState(bool fullscreen) {
+  bool borderless_window = (SDL_GetWindowFlags(sdl_window_) & SDL_WINDOW_BORDERLESS) != 0;
+  if (fullscreen && REXCVAR_GET(fullscreen_borderless_window)) {
+    SDL_SetWindowFullscreen(sdl_window_, false);
+    SDL_Rect bounds;
+    if (!SDL_GetDisplayBounds(SDL_GetDisplayForWindow(sdl_window_), &bounds)) {
+      REXLOG_WARN("SDL_GetDisplayBounds failed ({}); using SDL fullscreen", SDL_GetError());
+      SDL_SetWindowFullscreen(sdl_window_, true);
+      return;
+    }
+    SDL_SetWindowBordered(sdl_window_, false);
+    SDL_SetWindowPosition(sdl_window_, bounds.x, bounds.y);
+    SDL_SetWindowSize(sdl_window_, bounds.w, bounds.h);
+    return;
+  }
+  if (borderless_window) {
+    // Back from the borderless window: normal window at the desired size.
+    SDL_SetWindowBordered(sdl_window_, true);
+#if REX_PLATFORM_MAC
+    SDL_SetWindowSize(sdl_window_, int(GetDesiredLogicalWidth()), int(GetDesiredLogicalHeight()));
+#else
+    SDL_SetWindowSize(sdl_window_, int(SizeToPhysical(GetDesiredLogicalWidth())),
+                      int(SizeToPhysical(GetDesiredLogicalHeight())));
+#endif
+    SDL_DisplayID display = SDL_GetDisplayForWindow(sdl_window_);
+    SDL_SetWindowPosition(sdl_window_, SDL_WINDOWPOS_CENTERED_DISPLAY(display),
+                          SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+  }
+  // Borderless desktop fullscreen (a NULL display mode is SDL3's default).
+  SDL_SetWindowFullscreen(sdl_window_, fullscreen);
 }
 
 void WindowSDL::ApplyNewTitle() {
@@ -448,9 +485,11 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
       break;
     case SDL_EVENT_WINDOW_RESIZED: {
       // Track the user-driven size as the desired size for the normal state
-      // only (mirrors the Win32 WM_SIZE handling).
+      // only (mirrors the Win32 WM_SIZE handling). Borderless = the
+      // fullscreen_borderless_window mode, not a normal window size.
       SDL_WindowFlags flags = SDL_GetWindowFlags(sdl_window_);
-      if (!(flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED))) {
+      if (!(flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED |
+                     SDL_WINDOW_BORDERLESS))) {
 #if REX_PLATFORM_MAC
         // Cocoa reports the client size in logical points. Converting it from
         // the backing DPI a second time would halve the desired size on Retina

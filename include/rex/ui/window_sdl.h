@@ -61,6 +61,10 @@ class WindowSDL final : public Window {
   void RequestPaintImpl() override;
 
  private:
+  // SDL fullscreen, or a borderless window covering the display with
+  // fullscreen_borderless_window.
+  void ApplyFullscreenState(bool fullscreen);
+
   SDLWindowedAppContext& sdl_app_context() const {
     return static_cast<SDLWindowedAppContext&>(app_context());
   }
