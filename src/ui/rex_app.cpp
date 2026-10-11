@@ -51,6 +51,12 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_STRING(gpu_backend, "any", "GPU",
+                      "Graphics backend of the GPU plugin: any (the first compiled in, D3D12 on "
+                      "Windows), d3d12 or vulkan")
+    .allowed({"any", "d3d12", "vulkan"})
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace rex {
 
 // --- ReXApp ---
@@ -314,11 +320,12 @@ bool ReXApp::SetupPresentation() {
   OnPreSetup(config_);
 
   if (!config_.graphics && !config_.gpu_plugin.empty()) {
-    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin);
+    std::string gpu_backend = REXCVAR_GET(gpu_backend);
+    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin, gpu_backend);
     if (!config_.graphics) {
       // Fatal by design: no silent headless fallback.
-      auto msg =
-          fmt::format("Failed to load GPU plugin '{}'. See log for details.", config_.gpu_plugin);
+      auto msg = fmt::format("Failed to load GPU plugin '{}' (backend '{}'). See log for details.",
+                             config_.gpu_plugin, gpu_backend);
       REXLOG_ERROR("{}", msg);
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
       return false;
