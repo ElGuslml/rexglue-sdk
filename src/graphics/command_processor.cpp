@@ -718,6 +718,14 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
+  // Perf: GRAW also writes its shader constants with type-0 packets (~200 registers per draw,
+  // 1.4M per frame); hand whole constant ranges to the bulk path (one copy + one dirty check in the
+  // backend's WriteRegistersFromMem) instead of one virtual WriteRegister per dword.
+  if (!write_one_reg && base_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
+      base_index + count - 1 <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
+    WriteRegisterRangeFromRing(reader, base_index, count);
+    return true;
+  }
   volatile uint32_t* reg_values = register_file_->values;  // volatile for the WAIT_REG_MEM loop
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
