@@ -117,6 +117,9 @@ class UserProfile {
       (void)stream;
       data->type = static_cast<uint8_t>(type);
     }
+    // Bytes Append writes to the stream (after the X_USER_PROFILE_SETTING array): the stored
+    // value of a WSTRING or BINARY setting, 0 for the types held in the setting itself.
+    virtual size_t data_size() const { return 0; }
     virtual std::vector<uint8_t> Serialize() const { return std::vector<uint8_t>(); }
     virtual void Deserialize(std::vector<uint8_t>) {}
     bool is_title_specific() const { return (setting_id & 0x3F00) == 0x3F00; }
@@ -152,6 +155,7 @@ class UserProfile {
     UnicodeSetting(uint32_t setting_id, const std::u16string& value)
         : Setting(setting_id, Type::WSTRING, 8, true), value(value) {}
     std::u16string value;
+    size_t data_size() const override { return value.empty() ? 0 : 2 * (value.size() + 1); }
     void Append(X_USER_PROFILE_SETTING_DATA* data, SettingByteStream* stream) override {
       Setting::Append(data, stream);
       if (value.empty()) {
@@ -183,6 +187,7 @@ class UserProfile {
     BinarySetting(uint32_t setting_id, const std::vector<uint8_t>& value)
         : Setting(setting_id, Type::BINARY, 8, true), value(value) {}
     std::vector<uint8_t> value;
+    size_t data_size() const override { return value.size(); }
     void Append(X_USER_PROFILE_SETTING_DATA* data, SettingByteStream* stream) override {
       Setting::Append(data, stream);
       if (value.empty()) {
