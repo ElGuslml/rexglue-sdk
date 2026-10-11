@@ -34,6 +34,7 @@
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
+#include <rex/thread.h>
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
 
@@ -990,6 +991,31 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+
+  // gpu_guest_fps_limit: hold the command processor after a guest
+  // frame so the next one isn't swapped before 1/limit s has passed. The game's
+  // render thread then waits for the ring buffer and the whole game runs at
+  // that rate, as with a slower GPU; the vblank keeps its 60 Hz. Only the
+  // command processor thread gets here.
+  static uint64_t fps_limit_next_swap = 0;
+  if (int32_t fps_limit = REXCVAR_GET(gpu_guest_fps_limit); fps_limit > 0) {
+    uint64_t frequency = rex::chrono::Clock::QueryHostTickFrequency();
+    uint64_t interval = frequency / uint64_t(fps_limit);
+    uint64_t now = rex::chrono::Clock::QueryHostTickCount();
+    if (fps_limit_next_swap && now < fps_limit_next_swap) {
+      rex::thread::PreciseSleep(
+          std::chrono::microseconds((fps_limit_next_swap - now) * 1000000 / frequency));
+      now = rex::chrono::Clock::QueryHostTickCount();
+    }
+    // Keep the cadence unless this frame came more than an interval late.
+    if (fps_limit_next_swap && now < fps_limit_next_swap + interval) {
+      fps_limit_next_swap += interval;
+    } else {
+      fps_limit_next_swap = now + interval;
+    }
+  } else {
+    fps_limit_next_swap = 0;
+  }
 
   ++counter_;
   return true;

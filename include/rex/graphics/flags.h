@@ -48,6 +48,7 @@ REXCVAR_DECLARE(bool, direct_host_resolve);
 REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
 REXCVAR_DECLARE(bool, gpu_depth_clamp);
 REXCVAR_DECLARE(bool, gpu_async_pipelines_no_frame_wait);
+REXCVAR_DECLARE(int32_t, gpu_guest_fps_limit);
 REXCVAR_DECLARE(bool, gpu_3d_to_2d_texture);
 REXCVAR_DECLARE(int32_t, anisotropic_override);
 REXCVAR_DECLARE(int32_t, texture_cache_memory_limit_render_to_texture);

@@ -101,6 +101,32 @@ void Sleep(std::chrono::microseconds duration) {
   }
 }
 
+void PreciseSleep(std::chrono::microseconds duration) {
+  if (duration.count() <= 0) {
+    return;
+  }
+  struct HighResolutionTimer {
+    // Windows 10 1803+; independent of timeBeginPeriod.
+    HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                           TIMER_ALL_ACCESS);
+    ~HighResolutionTimer() {
+      if (handle) {
+        CloseHandle(handle);
+      }
+    }
+  };
+  thread_local HighResolutionTimer timer;
+  if (timer.handle) {
+    LARGE_INTEGER due;
+    due.QuadPart = -LONGLONG(duration.count()) * 10;  // relative, 100 ns units
+    if (SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0) &&
+        WaitForSingleObject(timer.handle, INFINITE) == WAIT_OBJECT_0) {
+      return;
+    }
+  }
+  Sleep(duration);
+}
+
 SleepResult AlertableSleep(std::chrono::microseconds duration) {
   if (SleepEx(static_cast<DWORD>(duration.count() / 1000), TRUE) == WAIT_IO_COMPLETION) {
     return SleepResult::kAlerted;
