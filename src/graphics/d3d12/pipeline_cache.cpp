@@ -1428,7 +1428,8 @@ bool PipelineCache::GetCurrentStateDescription(
   if (tessellated && REXCVAR_GET(d3d12_tessellation_wireframe)) {
     description_out.fill_mode_wireframe = 1;
   }
-  description_out.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
+  description_out.depth_clip =
+      !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable && !REXCVAR_GET(gpu_depth_clamp);
   bool depth_stencil_bound_and_used = false;
   if (!edram_rov_used) {
     // Depth/stencil. No stencil, always passing depth test and no depth writing

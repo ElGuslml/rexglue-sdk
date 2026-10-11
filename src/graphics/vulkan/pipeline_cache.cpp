@@ -1460,8 +1460,10 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
   description_out.primitive_topology = primitive_topology;
   description_out.primitive_restart = primitive_processing_result.host_primitive_reset_enabled;
 
+  // gpu_depth_clamp: Xenos does not clip in Z (see the D3D12 pipeline cache), clamp instead.
   description_out.depth_clamp_enable =
-      device_properties.depthClamp && regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
+      device_properties.depthClamp &&
+      (regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable || REXCVAR_GET(gpu_depth_clamp));
 
   // Tessellated draws are patch-domain polygonal primitives regardless of guest
   // register ambiguity in non-explicit major mode configurations.
