@@ -694,6 +694,16 @@ bool CommandProcessor::ExecutePacket(memory::RingBuffer* reader) {
   }
 }
 
+// Perf: registers whose writes have side effects in WriteRegister (base class:
+// scratch writeback, COHER_STATUS_HOST, gamma ramp; D3D12 backend: shader/fetch/bool/loop constants
+// dirty tracking, and extended registers beyond kRegisterCount). Every other register is a plain store.
+static inline bool RegisterWriteHasSideEffects(uint32_t index) {
+  return index >= XE_GPU_REG_SHADER_CONSTANT_000_X ||
+         (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) ||
+         index == XE_GPU_REG_COHER_STATUS_HOST ||
+         (index >= XE_GPU_REG_DC_LUT_RW_MODE && index <= XE_GPU_REG_DC_LUT_WRITE_EN_MASK);
+}
+
 bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet) {
   // Type-0 packet.
   // Write count registers in sequence to the registers starting at
@@ -708,10 +718,17 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
+  volatile uint32_t* reg_values = register_file_->values;  // volatile for the WAIT_REG_MEM loop
   for (uint32_t m = 0; m < count; m++) {
     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
     uint32_t target_index = write_one_reg ? base_index : base_index + m;
-    WriteRegister(target_index, reg_data);
+    // Perf: GRAW writes ~40 state registers per draw this way; skip the two-level virtual
+    // WriteRegister for the ones without side effects.
+    if (!RegisterWriteHasSideEffects(target_index)) {
+      reg_values[target_index] = reg_data;
+    } else {
+      WriteRegister(target_index, reg_data);
+    }
   }
 
   return true;
