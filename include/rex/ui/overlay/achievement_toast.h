@@ -35,6 +35,9 @@ class AchievementToastDialog : public AchievementNotificationDialog {
   // Thread-safe: safe to call from any thread, including guest threads.
   void Push(const rex::system::AchievementEvent& event) override;
 
+  // Only while a toast is queued or showing (it is registered all session).
+  bool WantsContinuousPaint() override;
+
  protected:
   void OnDraw(ImGuiIO& io) override;
 
