@@ -39,6 +39,12 @@ REXCVAR_DEFINE_BOOL(protect_zero, true, "Memory", "Protect the zero page from re
 REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
                     "Protect released memory to prevent accesses");
 
+REXCVAR_DEFINE_BOOL(invalidate_physical_on_alloc, true, "Memory",
+                    "Invalidate GPU-side copies (shared memory) of newly allocated physical "
+                    "memory. A GPU write (resolve) processed after the game released the memory "
+                    "can't be watched (released pages aren't watched), so without this the GPU "
+                    "keeps that stale data after the memory is reused and CPU writes go unnoticed");
+
 REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allocated heap memory");
 
 namespace rex::memory {
@@ -1903,7 +1909,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t allocation_
 
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
-  auto global_lock = AcquireHostPageReconcileLock();
+  auto global_lock = rex::thread::global_critical_region::AcquireDirect();  // always: InvalidateNewAllocation needs it before heap_mutex_
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
 
   // Allocate from parent heap (gets our physical address in 0-512mb).
@@ -1924,6 +1930,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t allocation_
     // TODO(benvanik): don't leak parent memory.
     return false;
   }
+  InvalidateNewAllocation(parent_address, size);
   *out_address = address;
   return true;
 }
@@ -1936,7 +1943,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t ali
 
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
-  auto global_lock = AcquireHostPageReconcileLock();
+  auto global_lock = rex::thread::global_critical_region::AcquireDirect();  // always: InvalidateNewAllocation needs it before heap_mutex_
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
 
   // Allocate from parent heap (gets our physical address in 0-512mb).
@@ -1957,6 +1964,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t ali
     // TODO(benvanik): don't leak parent memory.
     return false;
   }
+  InvalidateNewAllocation(parent_base_address, size);
 
   return true;
 }
@@ -1972,7 +1980,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint3
 
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
-  auto global_lock = AcquireHostPageReconcileLock();
+  auto global_lock = rex::thread::global_critical_region::AcquireDirect();  // always: InvalidateNewAllocation needs it before heap_mutex_
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
 
   // Allocate from parent heap (gets our physical address in 0-512mb).
@@ -1995,6 +2003,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint3
     // TODO(benvanik): don't leak parent memory.
     return false;
   }
+  InvalidateNewAllocation(parent_address, size);
   *out_address = address;
   return true;
 }
@@ -2345,6 +2354,22 @@ bool PhysicalHeap::IsHostPageWriteWatched(uint32_t host_page_number) const {
   }
   return (system_page_flags_[host_page_number >> 6].notify_on_invalidation &
           (uint64_t(1) << (host_page_number & 63))) != 0;
+}
+
+void PhysicalHeap::InvalidateNewAllocation(uint32_t physical_address, uint32_t length) {
+  // A GPU write (for instance, a resolve the GPU processed late, after the game
+  // had already released the memory) may have marked this range as valid in a
+  // GPU-side copy while it wasn't allocated - and released pages aren't watched,
+  // so nothing would ever invalidate it, and CPU writes after reallocation would
+  // go unnoticed. Newly allocated memory has no meaningful GPU-side contents, so
+  // dropping them is always safe (it only causes a reupload from CPU memory).
+  if (!REXCVAR_GET(invalidate_physical_on_alloc) || !length) {
+    return;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  for (auto invalidation_callback : memory_->physical_memory_invalidation_callbacks_) {
+    invalidation_callback->first(invalidation_callback->second, physical_address, length, true);
+  }
 }
 
 uint32_t PhysicalHeap::GetPhysicalAddress(uint32_t address) const {
