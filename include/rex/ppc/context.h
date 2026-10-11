@@ -171,32 +171,40 @@ struct FPSCRRegister {
     return HostToGuest[(csr & RoundMaskVal) >> RoundShift];
   }
 
+  // Starts from the thread's current MXCSR/FPCR (not the cached csr, which can be 0
+  // in contexts that never went through InitHost) and keeps the host floating-point
+  // exceptions masked: with csr == 0, mtfsf unmasked them and any inexact fmuls
+  // crashed the process (STATUS_FLOAT_INEXACT_RESULT).
   inline void storeFromGuest(uint32_t value) noexcept {
-    csr &= ~RoundMaskVal;
-    csr |= Platform::GuestToHost[value & kRoundMask];
+    csr = (getcsr() & ~uint32_t(RoundMaskVal)) | uint32_t(Platform::GuestToHost[value & kRoundMask]);
+    Platform::InitHostExceptions(csr);
     setcsr(csr);
   }
 
   inline void enableFlushModeUnconditional() noexcept {
-    csr |= FlushMask;
+    csr = getcsr() | uint32_t(FlushMask);
+    Platform::InitHostExceptions(csr);
     setcsr(csr);
   }
 
   inline void disableFlushModeUnconditional() noexcept {
-    csr &= ~FlushMask;
+    csr = getcsr() & ~uint32_t(FlushMask);
+    Platform::InitHostExceptions(csr);
     setcsr(csr);
   }
 
   inline void enableFlushMode() noexcept {
     if ((csr & FlushMask) != FlushMask) [[unlikely]] {
-      csr |= FlushMask;
+      csr = getcsr() | uint32_t(FlushMask);
+      Platform::InitHostExceptions(csr);
       setcsr(csr);
     }
   }
 
   inline void disableFlushMode() noexcept {
     if ((csr & FlushMask) != 0) [[unlikely]] {
-      csr &= ~FlushMask;
+      csr = getcsr() & ~uint32_t(FlushMask);
+      Platform::InitHostExceptions(csr);
       setcsr(csr);
     }
   }
