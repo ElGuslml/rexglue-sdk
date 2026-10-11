@@ -12,6 +12,7 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <algorithm>
 #include <cstring>
 
 #include <rex/cvar.h>
@@ -179,6 +180,8 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     return X_ERROR_INVALID_PARAMETER;
   }
 
+  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+
   uint32_t needed_header_size = 0;
   uint32_t needed_data_size = 0;
   for (uint32_t i = 0; i < setting_count; ++i) {
@@ -187,9 +190,19 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     setting_key.value = static_cast<uint32_t>(setting_ids[i]);
     switch (static_cast<UserProfile::Setting::Type>(setting_key.type)) {
       case UserProfile::Setting::Type::WSTRING:
-      case UserProfile::Setting::Type::BINARY:
-        needed_data_size += setting_key.size;
+      case UserProfile::Setting::Type::BINARY: {
+        // The key gives the setting's nominal maximum, but a title may have stored more through
+        // XamUserWriteProfileSettings (Pirates of the Caribbean: At World's End writes 1024 bytes
+        // into the 1000-byte title-specific settings). The title allocates the buffer from the
+        // size reported here and Append writes the stored value, so report the larger of the two.
+        size_t data_size = setting_key.size;
+        auto setting = user_profile->GetSetting(setting_key.value);
+        if (setting && setting->is_set) {
+          data_size = std::max(data_size, setting->data_size());
+        }
+        needed_data_size += static_cast<uint32_t>(data_size);
         break;
+      }
       default:
         break;
     }
@@ -220,8 +233,6 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     }
     return X_ERROR_NO_SUCH_USER;
   }
-
-  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
 
   // First call asks for size (fill buffer_size_ptr).
   // Second call asks for buffer contents with that size.
@@ -271,7 +282,15 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     out_setting->setting_id = setting_id;
 
     if (setting && setting->is_set) {
-      setting->Append(&out_setting->data, &out_stream);
+      // Never write past the title's buffer: the setting is left unset instead.
+      if (out_stream.offset() + setting->data_size() > buffer_size) {
+        REXKRNL_ERROR(
+            "XamUserReadProfileSettingsEx: setting {:08X} needs {} bytes at offset {} of a {} "
+            "byte buffer, skipped",
+            setting_id, setting->data_size(), out_stream.offset(), buffer_size);
+      } else {
+        setting->Append(&out_setting->data, &out_stream);
+      }
     }
     ++out_setting;
   }
