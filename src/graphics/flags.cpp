@@ -16,6 +16,11 @@
 REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
                     "Allow invalid fetch constants");
 REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
+REXCVAR_DEFINE_BOOL(gpu_depth_clamp, false, "GPU",
+                    "Never clip primitives against the near/far Z planes; clamp depth to the viewport "
+                    "range instead (D3D12 DepthClipEnable = FALSE). Xenos appears to behave this way: "
+                    "555307D5 (GRAW) draws its sky dome 1.5x beyond its own far plane with "
+                    "PA_CL_CLIP_CNTL.clip_disable = 0 and expects it to be visible");
 REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");
 REXCVAR_DEFINE_BOOL(depth_float24_convert_in_pixel_shader, false, "GPU",
                     "Convert float24 depth in pixel shader");
