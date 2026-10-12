@@ -41,6 +41,12 @@ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
                     "Resolve from host render targets directly to shared memory when possible")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(render_target_skip_transfers_on_overwrite, true, "GPU",
+                    "Don't copy the previous contents of an EDRAM range into a render target when "
+                    "the draw replaces every sample of it (clears done with a full-screen "
+                    "triangle or rectangle, often with another MSAA / pitch than the scene)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::graphics {
 
 void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,
@@ -399,7 +405,8 @@ void RenderTargetCache::BeginFrame() {
 
 bool RenderTargetCache::Update(bool is_rasterization_done,
                                reg::RB_DEPTHCONTROL normalized_depth_control,
-                               uint32_t normalized_color_mask, const Shader& vertex_shader) {
+                               uint32_t normalized_color_mask, const Shader& vertex_shader,
+                               const Shader* pixel_shader) {
   const RegisterFile& regs = register_file();
   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
 
@@ -678,6 +685,38 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     }
   }
 
+  // An ownership transfer into a render target copies what the previous owner
+  // left in the EDRAM range so the draw can read it or keep it. When one
+  // triangle or rectangle covers the top of the range at its full width and
+  // replaces every sample (all components written without blending, depth and
+  // stencil always written), nothing of that survives the draw in the covered
+  // rows, and the copy of those rows is skipped with a cutout, as for resolve
+  // clears. Games clear EDRAM this way, often with another MSAA / pitch than the
+  // scene (4x MSAA at half the pitch has the same tile layout as 2x MSAA at the
+  // full pitch): each such clear would otherwise copy the whole frame into the
+  // alias and back.
+  Transfer::Rectangle full_overwrite_cutout = {};
+  uint32_t full_overwrite_rts_bits = 0;
+  if (!interlock_barrier_only && REXCVAR_GET(render_target_skip_transfers_on_overwrite)) {
+    full_overwrite_rts_bits = GetFullyOverwrittenRenderTargets(
+        depth_and_color_rts_used_bits, normalized_depth_control, normalized_color_mask,
+        pixel_shader);
+    if (full_overwrite_rts_bits) {
+      // The range is EDRAM tile-aligned, the draw must cover the padding too.
+      full_overwrite_cutout.width_pixels =
+          pitch_tiles_at_32bpp * (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2);
+      uint32_t range_height_pixels =
+          (length_used_tiles_at_32bpp / pitch_tiles_at_32bpp) *
+          (xenos::kEdramTileHeightSamples >>
+           uint32_t(msaa_samples >= xenos::MsaaSamples::k2X));
+      full_overwrite_cutout.height_pixels = draw_extent_estimator_.GetFullCoverageHeight(
+          vertex_shader, full_overwrite_cutout.width_pixels, range_height_pixels);
+      if (!full_overwrite_cutout.height_pixels) {
+        full_overwrite_rts_bits = 0;
+      }
+    }
+  }
+
   // From now on ownership transfers should succeed for simplicity and
   // consistency, even if they fail in the implementation (just ignore that and
   // draw with whatever contents currently are in the render target in this
@@ -687,7 +726,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
     uint32_t rt_bit_index = rt_base_index.second;
     ChangeOwnership(rt_keys[rt_bit_index], 0, rt_lengths_tiles[i],
-                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
+                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index],
+                    (full_overwrite_rts_bits & (uint32_t(1) << rt_bit_index))
+                        ? &full_overwrite_cutout
+                        : nullptr);
   }
 
   if (interlock_barrier_only) {
@@ -1173,6 +1215,68 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
     render_targets_.emplace(key, render_target);
   }
   return render_target;
+}
+
+uint32_t RenderTargetCache::GetFullyOverwrittenRenderTargets(
+    uint32_t depth_and_color_rts_used_bits, reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask, const Shader* pixel_shader) const {
+  const RegisterFile& regs = register_file();
+  // Discarded pixels and alpha-dependent coverage leave samples unwritten.
+  if (pixel_shader && pixel_shader->kills_pixels()) {
+    return 0;
+  }
+  if (draw_util::DoesCoverageDependOnAlpha(regs.Get<reg::RB_COLORCONTROL>())) {
+    return 0;
+  }
+  uint32_t full_overwrite_rts_bits = 0;
+  if (depth_and_color_rts_used_bits & 1) {
+    // Every sample must pass the depth and stencil tests and be written with a
+    // value that doesn't depend on the previous one. Stencil disabled keeps the
+    // stencil, so that's not a full overwrite of the depth / stencil buffer.
+    if (normalized_depth_control.z_enable && normalized_depth_control.z_write_enable &&
+        normalized_depth_control.zfunc == xenos::CompareFunction::kAlways &&
+        normalized_depth_control.stencil_enable) {
+      auto is_stencil_overwritten = [](xenos::CompareFunction func, xenos::StencilOp zpass,
+                                       uint32_t write_mask) {
+        return func == xenos::CompareFunction::kAlways &&
+               (zpass == xenos::StencilOp::kReplace || zpass == xenos::StencilOp::kZero) &&
+               write_mask == 0xFF;
+      };
+      bool stencil_overwritten = is_stencil_overwritten(
+          normalized_depth_control.stencilfunc, normalized_depth_control.stencilzpass,
+          regs.Get<reg::RB_STENCILREFMASK>().stencilwritemask);
+      if (normalized_depth_control.backface_enable) {
+        stencil_overwritten &= is_stencil_overwritten(
+            normalized_depth_control.stencilfunc_bf, normalized_depth_control.stencilzpass_bf,
+            regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF).stencilwritemask);
+      }
+      if (stencil_overwritten) {
+        full_overwrite_rts_bits |= 1;
+      }
+    }
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    uint32_t rt_bit = uint32_t(1) << (1 + i);
+    if (!(depth_and_color_rts_used_bits & rt_bit)) {
+      continue;
+    }
+    // All components written, and blending that doesn't read the destination.
+    if (((normalized_color_mask >> (4 * i)) & 0b1111) != 0b1111) {
+      continue;
+    }
+    auto blend_control =
+        regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    if (blend_control.color_srcblend != xenos::BlendFactor::kOne ||
+        blend_control.color_destblend != xenos::BlendFactor::kZero ||
+        blend_control.color_comb_fcn != xenos::BlendOp::kAdd ||
+        blend_control.alpha_srcblend != xenos::BlendFactor::kOne ||
+        blend_control.alpha_destblend != xenos::BlendFactor::kZero ||
+        blend_control.alpha_comb_fcn != xenos::BlendOp::kAdd) {
+      continue;
+    }
+    full_overwrite_rts_bits |= rt_bit;
+  }
+  return full_overwrite_rts_bits;
 }
 
 bool RenderTargetCache::WouldOwnershipChangeRequireTransfers(RenderTargetKey dest,

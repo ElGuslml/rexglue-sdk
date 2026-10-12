@@ -171,8 +171,11 @@ class RenderTargetCache {
 
   virtual void BeginFrame();
 
+  // pixel_shader may be null if the draw has no pixel shader; it is only used to find out whether
+  // the draw replaces every sample of the render targets it covers.
   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
-                      uint32_t normalized_color_mask, const Shader& vertex_shader);
+                      uint32_t normalized_color_mask, const Shader& vertex_shader,
+                      const Shader* pixel_shader);
 
   // Returns bits where 0 is whether a depth render target is currently bound on
   // the host and 1... are whether the same applies to color render targets, and
@@ -640,6 +643,13 @@ class RenderTargetCache {
   // barriers are still needed before accessing ranges written before the
   // barrier and addressed by different target-independent rasterization pixel
   // positions.
+  // Bits of the used render targets (0 is depth, 1...4 are color) that the
+  // draw's output state replaces every covered sample of, without reading it.
+  uint32_t GetFullyOverwrittenRenderTargets(uint32_t depth_and_color_rts_used_bits,
+                                            reg::RB_DEPTHCONTROL normalized_depth_control,
+                                            uint32_t normalized_color_mask,
+                                            const Shader* pixel_shader) const;
+
   bool WouldOwnershipChangeRequireTransfers(RenderTargetKey dest,
                                             uint32_t start_tiles_base_relative,
                                             uint32_t length_tiles) const;

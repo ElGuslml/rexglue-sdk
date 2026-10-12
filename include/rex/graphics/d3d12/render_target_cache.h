@@ -57,7 +57,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   Path GetPath() const override { return path_; }
 
   bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
-              uint32_t normalized_color_mask, const Shader& vertex_shader) override;
+              uint32_t normalized_color_mask, const Shader& vertex_shader,
+              const Shader* pixel_shader) override;
 
   void InvalidateCommandListRenderTargets() {
     are_current_command_list_render_targets_valid_ = false;
