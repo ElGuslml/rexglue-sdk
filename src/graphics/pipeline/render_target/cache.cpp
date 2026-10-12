@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <optional>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
@@ -39,6 +40,14 @@ REXCVAR_DEFINE_BOOL(snorm16_render_target_full_range, true, "GPU",
 
 REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
                     "Resolve from host render targets directly to shared memory when possible")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(render_target_draw_clears, false, "GPU",
+                    "Perform a draw that writes constant values to every sample of a rectangle of "
+                    "its render targets (a clear done with a full-screen triangle, rectangle or "
+                    "quad, often with another MSAA / pitch than the scene) as a clear of the host "
+                    "render targets that currently hold that EDRAM, so that nothing has to be copied "
+                    "into an alias render target and back")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(render_target_skip_transfers_on_overwrite, true, "GPU",
@@ -406,8 +415,11 @@ void RenderTargetCache::BeginFrame() {
 bool RenderTargetCache::Update(bool is_rasterization_done,
                                reg::RB_DEPTHCONTROL normalized_depth_control,
                                uint32_t normalized_color_mask, const Shader& vertex_shader,
-                               const Shader* pixel_shader) {
+                               const Shader* pixel_shader, bool* draw_done_as_clear_out) {
   const RegisterFile& regs = register_file();
+  if (draw_done_as_clear_out) {
+    *draw_done_as_clear_out = false;
+  }
   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
 
   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
@@ -627,8 +639,8 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                      << (((rts_are_64bpp >> rt_base_last.second) & 1) ^ 1));
   }
 
-  // Make sure all the needed render targets are created, and gather lengths of
-  // ranges used by each render target.
+  // Gather the keys of the needed render targets and the lengths of the ranges
+  // used by each.
   RenderTargetKey rt_keys[1 + xenos::kMaxColorRenderTargets];
   RenderTarget* rts[1 + xenos::kMaxColorRenderTargets];
   uint32_t rt_lengths_tiles[1 + xenos::kMaxColorRenderTargets];
@@ -646,13 +658,6 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     rt_key.msaa_samples = msaa_samples;
     rt_key.is_depth = rt_bit_index == 0;
     rt_key.resource_format = resource_formats[rt_bit_index];
-    if (!interlock_barrier_only) {
-      RenderTarget* render_target = GetOrCreateRenderTarget(rt_key);
-      if (!render_target) {
-        return false;
-      }
-      rts[rt_bit_index] = render_target;
-    }
     uint32_t rt_is_64bpp = (rts_are_64bpp >> rt_bit_index) & 1;
     // The last render target can occupy the EDRAM until the base of the first
     // render target (itself in case of 1 render target) with EDRAM addressing
@@ -687,33 +692,65 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
 
   // An ownership transfer into a render target copies what the previous owner
   // left in the EDRAM range so the draw can read it or keep it. When one
-  // triangle or rectangle covers the top of the range at its full width and
-  // replaces every sample (all components written without blending, depth and
-  // stencil always written), nothing of that survives the draw in the covered
-  // rows, and the copy of those rows is skipped with a cutout, as for resolve
-  // clears. Games clear EDRAM this way, often with another MSAA / pitch than the
-  // scene (4x MSAA at half the pitch has the same tile layout as 2x MSAA at the
-  // full pitch): each such clear would otherwise copy the whole frame into the
-  // alias and back.
+  // triangle, rectangle or quad replaces every sample of a rectangle of the
+  // range (all components written without blending, depth and stencil always
+  // written), nothing of that survives the draw there. Games clear EDRAM this
+  // way, often with another MSAA / pitch than the scene (4x MSAA at half the
+  // pitch has the same tile layout as 2x MSAA at the full pitch): each such
+  // clear would otherwise copy the whole frame into the alias and back. So:
+  // - with render_target_draw_clears, if what the draw writes is constant, it
+  //   is done as a clear of the render targets currently owning the EDRAM, and
+  //   nothing is bound or transferred (TryDrawAsClear);
+  // - with render_target_skip_transfers_on_overwrite, the copy of the covered
+  //   rectangle is skipped with a cutout, as for resolve clears.
   Transfer::Rectangle full_overwrite_cutout = {};
   uint32_t full_overwrite_rts_bits = 0;
-  if (!interlock_barrier_only && REXCVAR_GET(render_target_skip_transfers_on_overwrite)) {
+  bool draw_clears = REXCVAR_GET(render_target_draw_clears) && draw_done_as_clear_out;
+  if (!interlock_barrier_only &&
+      (draw_clears || REXCVAR_GET(render_target_skip_transfers_on_overwrite))) {
     full_overwrite_rts_bits = GetFullyOverwrittenRenderTargets(
         depth_and_color_rts_used_bits, normalized_depth_control, normalized_color_mask,
         pixel_shader);
     if (full_overwrite_rts_bits) {
       // The range is EDRAM tile-aligned, the draw must cover the padding too.
-      full_overwrite_cutout.width_pixels =
+      uint32_t range_width_pixels =
           pitch_tiles_at_32bpp * (xenos::kEdramTileWidthSamples >> msaa_samples_x_log2);
       uint32_t range_height_pixels =
           (length_used_tiles_at_32bpp / pitch_tiles_at_32bpp) *
           (xenos::kEdramTileHeightSamples >>
            uint32_t(msaa_samples >= xenos::MsaaSamples::k2X));
-      full_overwrite_cutout.height_pixels = draw_extent_estimator_.GetFullCoverageHeight(
-          vertex_shader, full_overwrite_cutout.width_pixels, range_height_pixels);
-      if (!full_overwrite_cutout.height_pixels) {
+      DrawExtentEstimator::CoverageRectangle coverage;
+      std::optional<float> constant_z;
+      if (draw_extent_estimator_.GetCoverageRectangle(vertex_shader, range_width_pixels,
+                                                      range_height_pixels, coverage, constant_z)) {
+        full_overwrite_cutout.x_pixels = coverage.x;
+        full_overwrite_cutout.y_pixels = coverage.y;
+        full_overwrite_cutout.width_pixels = coverage.width;
+        full_overwrite_cutout.height_pixels = coverage.height;
+        if (draw_clears && full_overwrite_rts_bits == depth_and_color_rts_used_bits &&
+            TryDrawAsClear(depth_and_color_rts_used_bits, rt_keys, full_overwrite_cutout,
+                           constant_z, normalized_depth_control, vertex_shader, pixel_shader)) {
+          *draw_done_as_clear_out = true;
+          return true;
+        }
+      } else {
         full_overwrite_rts_bits = 0;
       }
+    }
+    if (!REXCVAR_GET(render_target_skip_transfers_on_overwrite)) {
+      full_overwrite_rts_bits = 0;
+    }
+  }
+
+  // Make sure all the needed render targets are created.
+  if (!interlock_barrier_only) {
+    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+      uint32_t rt_bit_index = edram_bases_sorted[i].second;
+      RenderTarget* render_target = GetOrCreateRenderTarget(rt_keys[rt_bit_index]);
+      if (!render_target) {
+        return false;
+      }
+      rts[rt_bit_index] = render_target;
     }
   }
 
@@ -1215,6 +1252,352 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(Rend
     render_targets_.emplace(key, render_target);
   }
   return render_target;
+}
+
+namespace {
+
+// Xenos 7e3 float: 3-bit exponent biased by 3, 7-bit mantissa, [0, 32), round to nearest.
+uint32_t Float32To7e3(float f32) {
+  if (!(f32 > 0.0f)) {
+    return 0;
+  }
+  if (f32 >= 31.875f) {
+    return 0x3FF;
+  }
+  if (f32 < 0.25f) {
+    // Denormal: mantissa / 512.
+    return uint32_t(f32 * 512.0f + 0.5f);
+  }
+  uint32_t f32u32 = rex::memory::Reinterpret<uint32_t>(f32);
+  uint32_t exponent = (f32u32 >> 23) - 124;
+  uint32_t mantissa = ((f32u32 & 0x7FFFFF) + 0x8000) >> 16;
+  if (mantissa > 0x7F) {
+    mantissa = 0;
+    if (++exponent > 7) {
+      return 0x3FF;
+    }
+  }
+  return (exponent << 7) | mantissa;
+}
+
+uint32_t FloatToUNorm(float f32, uint32_t max_value) {
+  return uint32_t(std::min(std::max(f32, 0.0f), 1.0f) * float(max_value) + 0.5f);
+}
+
+// Packs a pixel shader output (after the exponent bias) the way the render
+// backend writes it to the EDRAM. Fixed-point 16-bit formats depend on the
+// backend's range handling and are not supported.
+bool PackColorRenderTargetValue(xenos::ColorRenderTargetFormat format, const float* color,
+                                uint64_t& value_out) {
+  switch (format) {
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
+      bool gamma = format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+      uint32_t value = 0;
+      for (uint32_t i = 0; i < 4; ++i) {
+        float component = std::min(std::max(color[i], 0.0f), 1.0f);
+        if (gamma && i < 3) {
+          component = xenos::LinearToPWLGamma(component);
+        }
+        value |= FloatToUNorm(component, 0xFF) << (i * 8);
+      }
+      value_out = value;
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10: {
+      value_out = FloatToUNorm(color[0], 0x3FF) | (FloatToUNorm(color[1], 0x3FF) << 10) |
+                  (FloatToUNorm(color[2], 0x3FF) << 20) | (FloatToUNorm(color[3], 0x3) << 30);
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16: {
+      value_out = Float32To7e3(color[0]) | (Float32To7e3(color[1]) << 10) |
+                  (Float32To7e3(color[2]) << 20) | (FloatToUNorm(color[3], 0x3) << 30);
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_16_16_FLOAT: {
+      value_out = uint32_t(rex::float_to_xenos_half(color[0])) |
+                  (uint32_t(rex::float_to_xenos_half(color[1])) << 16);
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT: {
+      value_out = 0;
+      for (uint32_t i = 0; i < 4; ++i) {
+        value_out |= uint64_t(rex::float_to_xenos_half(color[i])) << (i * 16);
+      }
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_32_FLOAT: {
+      value_out = rex::memory::Reinterpret<uint32_t>(color[0]);
+      return true;
+    }
+    case xenos::ColorRenderTargetFormat::k_32_32_FLOAT: {
+      value_out = uint64_t(rex::memory::Reinterpret<uint32_t>(color[0])) |
+                  (uint64_t(rex::memory::Reinterpret<uint32_t>(color[1])) << 32);
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+bool RenderTargetCache::TryDrawAsClear(uint32_t depth_and_color_rts_used_bits,
+                                       const RenderTargetKey* rt_keys,
+                                       const Transfer::Rectangle& coverage,
+                                       const std::optional<float>& constant_z,
+                                       reg::RB_DEPTHCONTROL normalized_depth_control,
+                                       const Shader& vertex_shader, const Shader* pixel_shader) {
+  if (GetPath() != Path::kHostRenderTargets || !coverage.width_pixels ||
+      !coverage.height_pixels) {
+    return false;
+  }
+  const RegisterFile& regs = register_file();
+  // The draw must have no other effect.
+  if (vertex_shader.memexport_eM_written() ||
+      (pixel_shader && pixel_shader->memexport_eM_written())) {
+    return false;
+  }
+
+  // The values written, packed as in the EDRAM. The output state has already
+  // been checked by GetFullyOverwrittenRenderTargets.
+  uint64_t clear_values[1 + xenos::kMaxColorRenderTargets] = {};
+  if (depth_and_color_rts_used_bits & 1) {
+    if (!constant_z.has_value() || (pixel_shader && pixel_shader->writes_depth())) {
+      return false;
+    }
+    auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+    if (pa_su_sc_mode_cntl.poly_offset_front_enable ||
+        pa_su_sc_mode_cntl.poly_offset_back_enable) {
+      return false;
+    }
+    // Depth is clamped to the viewport range; allow the rounding error of the viewport transform
+    // (-0.0000000037 has been seen for a 0 clear), but not actual out-of-range values, which could
+    // be clipped on the host.
+    float z = constant_z.value();
+    if (!(z >= -1e-5f && z <= 1.0f + 1e-5f)) {
+      return false;
+    }
+    z = std::min(std::max(z, 0.0f), 1.0f);
+    auto stencil_value = [](xenos::StencilOp zpass, uint32_t ref) {
+      return zpass == xenos::StencilOp::kReplace ? ref : 0;
+    };
+    uint32_t stencil = stencil_value(normalized_depth_control.stencilzpass,
+                                     regs.Get<reg::RB_STENCILREFMASK>().stencilref);
+    if (normalized_depth_control.backface_enable &&
+        stencil_value(normalized_depth_control.stencilzpass_bf,
+                      regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF)
+                          .stencilref) != stencil) {
+      return false;
+    }
+    uint32_t depth24;
+    switch (rt_keys[0].GetDepthFormat()) {
+      case xenos::DepthRenderTargetFormat::kD24S8:
+        depth24 = uint32_t(z * float(0xFFFFFF) + 0.5f);
+        break;
+      case xenos::DepthRenderTargetFormat::kD24FS8:
+        depth24 = xenos::Float32To20e4(z, REXCVAR_GET(depth_float24_round));
+        break;
+      default:
+        return false;
+    }
+    clear_values[0] = (uint64_t(depth24) << 8) | stencil;
+  }
+  bool pixel_shader_run = false;
+  float pixel_shader_colors[4][4];
+  uint32_t pixel_shader_written_mask = 0;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (!(depth_and_color_rts_used_bits & (uint32_t(1) << (1 + i)))) {
+      continue;
+    }
+    if (!pixel_shader) {
+      return false;
+    }
+    if (!pixel_shader_run) {
+      if (!draw_extent_estimator_.GetConstantPixelShaderOutputs(*pixel_shader, pixel_shader_colors,
+                                                                pixel_shader_written_mask)) {
+        return false;
+      }
+      pixel_shader_run = true;
+    }
+    if (!(pixel_shader_written_mask & (uint32_t(1) << i))) {
+      return false;
+    }
+    // Exponent bias, like in the system constants.
+    auto color_info = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]);
+    float color_exp_bias_scale =
+        rex::memory::Reinterpret<float>(int32_t(0x3F800000 + (color_info.color_exp_bias << 23)));
+    float color[4];
+    for (uint32_t j = 0; j < 4; ++j) {
+      color[j] = pixel_shader_colors[i][j] * color_exp_bias_scale;
+    }
+    if (!PackColorRenderTargetValue(rt_keys[1 + i].GetColorFormat(), color,
+                                    clear_values[1 + i])) {
+      return false;
+    }
+  }
+
+  // Map the covered rectangle of each render target to rectangles of the host
+  // render targets owning that EDRAM, through the 32-bit sample layout of the
+  // tiles (4x MSAA and 64bpp double the columns per pixel, 2x and 4x MSAA
+  // double the rows). The region is a set of linear tile ranges (one if it
+  // spans the full pitch, else one per row of tiles); each part of a range
+  // belonging to one owner becomes a rectangle of that owner: directly when
+  // the owner has the same pitch and its base is a whole number of rows away
+  // (any pixel rectangle), otherwise through whole tiles.
+  using Clear = DrawClearScratch;
+  std::vector<Clear>& clears = draw_clear_scratch_;
+  clears.clear();
+  for (uint32_t rt_bit_index = 0; rt_bit_index < 1 + xenos::kMaxColorRenderTargets;
+       ++rt_bit_index) {
+    if (!(depth_and_color_rts_used_bits & (uint32_t(1) << rt_bit_index))) {
+      continue;
+    }
+    const RenderTargetKey& key = rt_keys[rt_bit_index];
+    uint64_t value = clear_values[rt_bit_index];
+    bool is_64bpp = key.Is64bpp();
+    uint32_t columns_per_pixel =
+        (key.msaa_samples >= xenos::MsaaSamples::k4X ? 2 : 1) * (is_64bpp ? 2 : 1);
+    uint32_t rows_per_pixel = key.msaa_samples >= xenos::MsaaSamples::k2X ? 2 : 1;
+    uint32_t pitch_tiles = key.GetPitchTiles();
+    uint32_t column_start = coverage.x_pixels * columns_per_pixel;
+    uint32_t column_end = (coverage.x_pixels + coverage.width_pixels) * columns_per_pixel;
+    uint32_t row_start = coverage.y_pixels * rows_per_pixel;
+    uint32_t row_end = (coverage.y_pixels + coverage.height_pixels) * rows_per_pixel;
+    uint32_t tile_column_start = column_start / xenos::kEdramTileWidthSamples;
+    uint32_t tile_column_end =
+        (column_end + xenos::kEdramTileWidthSamples - 1) / xenos::kEdramTileWidthSamples;
+    uint32_t tile_row_start = row_start / xenos::kEdramTileHeightSamples;
+    uint32_t tile_row_end =
+        (row_end + xenos::kEdramTileHeightSamples - 1) / xenos::kEdramTileHeightSamples;
+    if (tile_column_end > pitch_tiles ||
+        key.base_tiles + (tile_row_end - 1) * pitch_tiles + tile_column_end >
+            xenos::kEdramTileCount) {
+      return false;
+    }
+    bool full_width = tile_column_start == 0 && tile_column_end == pitch_tiles;
+    bool tile_aligned = !(column_start % xenos::kEdramTileWidthSamples) &&
+                        !(column_end % xenos::kEdramTileWidthSamples) &&
+                        !(row_start % xenos::kEdramTileHeightSamples) &&
+                        !(row_end % xenos::kEdramTileHeightSamples);
+    uint32_t linear_range_count = full_width ? 1 : tile_row_end - tile_row_start;
+    for (uint32_t linear_range_index = 0; linear_range_index < linear_range_count;
+         ++linear_range_index) {
+      uint32_t linear_start, linear_end;
+      if (full_width) {
+        linear_start = key.base_tiles + tile_row_start * pitch_tiles;
+        linear_end = key.base_tiles + tile_row_end * pitch_tiles;
+      } else {
+        linear_start = key.base_tiles + (tile_row_start + linear_range_index) * pitch_tiles +
+                       tile_column_start;
+        linear_end = linear_start + (tile_column_end - tile_column_start);
+      }
+      auto it = ownership_ranges_.upper_bound(linear_start);
+      if (it == ownership_ranges_.begin()) {
+        return false;
+      }
+      --it;
+      for (; it != ownership_ranges_.end() && it->first < linear_end; ++it) {
+        uint32_t part_start = std::max(it->first, linear_start);
+        uint32_t part_end = std::min(it->second.end_tiles, linear_end);
+        if (part_end <= part_start) {
+          continue;
+        }
+        const RenderTargetKey& owner = it->second.render_target;
+        if (owner.IsEmpty()) {
+          return false;
+        }
+        auto owner_it = render_targets_.find(owner);
+        if (owner_it == render_targets_.end() || !owner_it->second) {
+          return false;
+        }
+        bool owner_is_64bpp = owner.Is64bpp();
+        uint64_t owner_value = value;
+        if (owner_is_64bpp != is_64bpp) {
+          if (owner_is_64bpp) {
+            owner_value = value | (value << 32);
+          } else {
+            if (uint32_t(value >> 32) != uint32_t(value)) {
+              return false;
+            }
+            owner_value = uint32_t(value);
+          }
+        }
+        uint32_t owner_pitch_tiles = owner.GetPitchTiles();
+        uint32_t owner_columns_per_pixel =
+            (owner.msaa_samples >= xenos::MsaaSamples::k4X ? 2 : 1) * (owner_is_64bpp ? 2 : 1);
+        uint32_t owner_rows_per_pixel = owner.msaa_samples >= xenos::MsaaSamples::k2X ? 2 : 1;
+        uint32_t owner_width_pixels = owner.pitch_tiles_at_32bpp *
+                                      (xenos::kEdramTileWidthSamples >>
+                                       uint32_t(owner.msaa_samples >= xenos::MsaaSamples::k4X));
+        uint32_t owner_height_pixels =
+            GetRenderTargetHeight(owner.pitch_tiles_at_32bpp, owner.msaa_samples);
+        int32_t base_delta_tiles = int32_t(key.base_tiles) - int32_t(owner.base_tiles);
+        if (owner_pitch_tiles == pitch_tiles && base_delta_tiles % int32_t(pitch_tiles) == 0) {
+          // Same layout: the part is rows [part_row_start, part_row_end) of the region's
+          // columns, offset by whole rows in the owner.
+          int32_t base_delta_rows = (base_delta_tiles / int32_t(pitch_tiles)) *
+                                    int32_t(xenos::kEdramTileHeightSamples);
+          uint32_t part_tile_row_start = (part_start - key.base_tiles) / pitch_tiles;
+          uint32_t part_tile_row_end =
+              (part_end - key.base_tiles + pitch_tiles - 1) / pitch_tiles;
+          int32_t part_row_start =
+              int32_t(std::max(row_start, part_tile_row_start * xenos::kEdramTileHeightSamples)) +
+              base_delta_rows;
+          int32_t part_row_end =
+              int32_t(std::min(row_end, part_tile_row_end * xenos::kEdramTileHeightSamples)) +
+              base_delta_rows;
+          if (part_row_start < 0 || part_row_end <= part_row_start ||
+              column_start % owner_columns_per_pixel || column_end % owner_columns_per_pixel ||
+              uint32_t(part_row_start) % owner_rows_per_pixel ||
+              uint32_t(part_row_end) % owner_rows_per_pixel) {
+            return false;
+          }
+          Clear clear;
+          clear.render_target = owner_it->second;
+          clear.rectangle.x_pixels = column_start / owner_columns_per_pixel;
+          clear.rectangle.y_pixels = uint32_t(part_row_start) / owner_rows_per_pixel;
+          clear.rectangle.width_pixels = (column_end - column_start) / owner_columns_per_pixel;
+          clear.rectangle.height_pixels =
+              uint32_t(part_row_end - part_row_start) / owner_rows_per_pixel;
+          clear.value = owner_value;
+          if (clear.rectangle.x_pixels + clear.rectangle.width_pixels > owner_width_pixels ||
+              clear.rectangle.y_pixels + clear.rectangle.height_pixels > owner_height_pixels) {
+            return false;
+          }
+          clears.push_back(clear);
+        } else {
+          // Different layout: only whole tiles can be mapped.
+          if (!tile_aligned || part_start < owner.base_tiles) {
+            return false;
+          }
+          Transfer::Rectangle rectangles[Transfer::kMaxRectanglesWithoutCutout];
+          uint32_t rectangle_count = Transfer::GetRangeRectangles(
+              part_start, part_end, owner.base_tiles, owner_pitch_tiles, owner.msaa_samples,
+              owner_is_64bpp, rectangles);
+          for (uint32_t i = 0; i < rectangle_count; ++i) {
+            const Transfer::Rectangle& rectangle = rectangles[i];
+            if (rectangle.x_pixels + rectangle.width_pixels > owner_width_pixels ||
+                rectangle.y_pixels + rectangle.height_pixels > owner_height_pixels) {
+              return false;
+            }
+            Clear clear;
+            clear.render_target = owner_it->second;
+            clear.rectangle = rectangle;
+            clear.value = owner_value;
+            clears.push_back(clear);
+          }
+        }
+      }
+    }
+  }
+
+  for (const Clear& clear : clears) {
+    ClearHostRenderTargetRectangle(clear.render_target, clear.rectangle, clear.value);
+  }
+  return true;
 }
 
 uint32_t RenderTargetCache::GetFullyOverwrittenRenderTargets(

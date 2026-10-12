@@ -347,17 +347,47 @@ void DrawExtentEstimator::PositionExportSink::Export(ucode::ExportRegister expor
     if (value_mask & 0b0100) {
       vertex_kill_ = rex::memory::Reinterpret<uint32_t>(value[2]);
     }
+  } else if (export_register >= ucode::ExportRegister::kVSInterpolator0 &&
+             export_register <= ucode::ExportRegister::kVSInterpolator15) {
+    uint32_t index =
+        uint32_t(export_register) - uint32_t(ucode::ExportRegister::kVSInterpolator0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (value_mask & (uint32_t(1) << i)) {
+        interpolators_[index][i] = value[i];
+      }
+    }
+    interpolator_masks_[index] |= value_mask & 0b1111;
   }
 }
 
-uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader, uint32_t width,
-                                                    uint32_t max_height) {
+void DrawExtentEstimator::ColorExportSink::Export(ucode::ExportRegister export_register,
+                                                  const float* value, uint32_t value_mask) {
+  uint32_t index = uint32_t(export_register) - uint32_t(ucode::ExportRegister::kPSColor0);
+  if (index >= 4) {
+    return;
+  }
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (value_mask & (uint32_t(1) << i)) {
+      colors_[index][i] = value[i];
+    }
+  }
+  component_masks_[index] |= value_mask & 0b1111;
+  if (component_masks_[index] == 0b1111) {
+    written_mask_ |= uint32_t(1) << index;
+  }
+}
+
+bool DrawExtentEstimator::GetCoverageRectangle(const Shader& vertex_shader, uint32_t width,
+                                               uint32_t height, CoverageRectangle& rectangle_out,
+                                               std::optional<float>& constant_z_out) {
   SCOPE_profile_cpu_f("gpu");
 
   const RegisterFile& regs = register_file_;
 
-  if (!width || !max_height) {
-    return 0;
+  constant_z_out.reset();
+  constant_interpolator_mask_ = 0;
+  if (!width || !height) {
+    return false;
   }
 
   // One triangle, rectangle or quad, with indices from memory or generated.
@@ -370,63 +400,61 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
     if (!is_rectangle && prim_type != xenos::PrimitiveType::kTriangleList &&
         prim_type != xenos::PrimitiveType::kTriangleStrip &&
         prim_type != xenos::PrimitiveType::kTriangleFan) {
-      return 0;
+      return false;
     }
   } else if (vertex_count == 4) {
     if (prim_type != xenos::PrimitiveType::kTriangleStrip &&
         prim_type != xenos::PrimitiveType::kTriangleFan &&
         prim_type != xenos::PrimitiveType::kQuadList) {
-      return 0;
+      return false;
     }
   } else {
-    return 0;
+    return false;
   }
   if (vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA &&
       vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
-    return 0;
+    return false;
   }
   if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
       regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
           xenos::VGTOutputPath::kTessellationEnable) {
-    return 0;
+    return false;
   }
   assert_true(vertex_shader.type() == xenos::ShaderType::kVertex);
   assert_true(vertex_shader.is_ucode_analyzed());
   if (!ShaderInterpreter::CanInterpretShader(vertex_shader)) {
-    return 0;
+    return false;
   }
 
-  // The scissor limits the height, and must contain the width (not clamped to the surface pitch:
-  // the width may be the EDRAM tile-aligned one, slightly larger than the pitch).
+  // The rectangle that can be covered at all: the render target, the scissor (not clamped to the
+  // surface pitch: the width may be the EDRAM tile-aligned one, slightly larger than the pitch), and
+  // the viewport when clipping is enabled.
   draw_util::Scissor scissor;
   draw_util::GetScissor(regs, scissor, false);
-  if (scissor.offset[0] || scissor.offset[1] || scissor.extent[0] < width) {
-    return 0;
-  }
-  max_height = std::min(max_height, scissor.extent[1]);
-  if (!max_height) {
-    return 0;
-  }
+  double clip_left = double(scissor.offset[0]);
+  double clip_top = double(scissor.offset[1]);
+  double clip_right = std::min(double(scissor.offset[0] + scissor.extent[0]), double(width));
+  double clip_bottom = std::min(double(scissor.offset[1] + scissor.extent[1]), double(height));
 
   // Culling and polygon mode can leave the primitive undrawn or drawn as lines or points.
   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
   if (!is_rectangle) {
     if (pa_su_sc_mode_cntl.cull_front || pa_su_sc_mode_cntl.cull_back) {
-      return 0;
+      return false;
     }
     if (pa_su_sc_mode_cntl.poly_mode == xenos::PolygonModeEnable::kDualMode &&
         (pa_su_sc_mode_cntl.polymode_front_ptype != xenos::PolygonType::kTriangles ||
          pa_su_sc_mode_cntl.polymode_back_ptype != xenos::PolygonType::kTriangles)) {
-      return 0;
+      return false;
     }
   }
 
-  // With clipping, only what's inside the viewport and the depth range is drawn: require the
-  // viewport to contain the rectangle and check the depth of each vertex; no user clip planes.
+  // With clipping, only what's inside the viewport and the depth range is drawn; no user clip
+  // planes.
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
   bool clipping = !pa_cl_clip_cntl.clip_disable;
   if (pa_cl_clip_cntl.value & 0b111111) {
-    return 0;
+    return false;
   }
   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
   float viewport_x_scale =
@@ -437,22 +465,22 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
       pa_cl_vte_cntl.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f;
   float viewport_y_offset =
       pa_cl_vte_cntl.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f;
+  float viewport_z_scale =
+      pa_cl_vte_cntl.vport_z_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE) : 1.0f;
+  float viewport_z_offset =
+      pa_cl_vte_cntl.vport_z_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET) : 0.0f;
   if (clipping) {
     if (pa_cl_vte_cntl.vtx_xy_fmt) {
-      return 0;
+      return false;
     }
-    // Normalized device coordinates -1...1 must map to at least 0...width, and the viewport
-    // limits the height.
-    if (!(viewport_x_offset - std::fabs(viewport_x_scale) <= 0.0f &&
-          viewport_x_offset + std::fabs(viewport_x_scale) >= float(width) &&
-          viewport_y_offset - std::fabs(viewport_y_scale) <= 0.0f)) {
-      return 0;
-    }
-    float viewport_bottom = viewport_y_offset + std::fabs(viewport_y_scale);
-    if (!(viewport_bottom >= 1.0f)) {
-      return 0;
-    }
-    max_height = std::min(max_height, uint32_t(std::min(viewport_bottom, 65536.0f)));
+    // Normalized device coordinates -1...1 map to the viewport rectangle.
+    clip_left = std::max(clip_left, double(viewport_x_offset - std::fabs(viewport_x_scale)));
+    clip_right = std::min(clip_right, double(viewport_x_offset + std::fabs(viewport_x_scale)));
+    clip_top = std::max(clip_top, double(viewport_y_offset - std::fabs(viewport_y_scale)));
+    clip_bottom = std::min(clip_bottom, double(viewport_y_offset + std::fabs(viewport_y_scale)));
+  }
+  if (!(clip_right > clip_left && clip_bottom > clip_top)) {
+    return false;
   }
   float vertex_x_offset = 0.0f, vertex_y_offset = 0.0f;
   if (pa_su_sc_mode_cntl.vtx_window_offset_enable) {
@@ -496,8 +524,10 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
   uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
   uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
 
-  // Run the vertex shader for the vertices, getting their screen-space positions.
+  // Run the vertex shader for the vertices, getting their screen-space positions and depths.
   double vertices[4][2];
+  bool z_constant = true;
+  float z_value = 0.0f;
   shader_interpreter_.SetShader(vertex_shader);
   PositionExportSink position_export_sink;
   shader_interpreter_.SetExportSink(&position_export_sink);
@@ -534,6 +564,22 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
       vertices_ok = false;
       break;
     }
+    // Interpolators written entirely and equal in every vertex are constant across the primitive.
+    for (uint32_t j = 0; j < 16; ++j) {
+      bool written = position_export_sink.interpolator_mask(j) == 0b1111;
+      if (i == 0) {
+        if (written) {
+          constant_interpolator_mask_ |= uint32_t(1) << j;
+          std::memcpy(constant_interpolators_[j], position_export_sink.interpolator(j),
+                      sizeof(float) * 4);
+        }
+      } else if ((constant_interpolator_mask_ & (uint32_t(1) << j)) &&
+                 (!written || std::memcmp(constant_interpolators_[j],
+                                          position_export_sink.interpolator(j),
+                                          sizeof(float) * 4) != 0)) {
+        constant_interpolator_mask_ &= ~(uint32_t(1) << j);
+      }
+    }
     uint32_t position_mask = position_export_sink.position_mask();
     const float* position = position_export_sink.position();
     if ((position_mask & 0b0011) != 0b0011) {
@@ -541,8 +587,9 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
       break;
     }
     float x = position[0], y = position[1];
+    bool w_positive = (position_mask & 0b1000) && position[3] > 0.0f;
     if (!pa_cl_vte_cntl.vtx_xy_fmt) {
-      if (!(position_mask & 0b1000) || !(position[3] > 0.0f)) {
+      if (!w_positive) {
         // At or behind the eye - no coverage can be proven.
         vertices_ok = false;
         break;
@@ -550,16 +597,34 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
       x /= position[3];
       y /= position[3];
     }
+    // Depth: needed for clipping, and reported if constant across the vertices.
+    bool z_known = false;
+    float z = 0.0f;
+    if (position_mask & 0b0100) {
+      if (pa_cl_vte_cntl.vtx_z_fmt) {
+        z = position[2];
+        z_known = true;
+      } else if (w_positive) {
+        z = position[2] / position[3];
+        z_known = true;
+      }
+    }
     if (clipping) {
-      if (!(position_mask & 0b0100)) {
+      if (!z_known ||
+          !(z >= (pa_cl_clip_cntl.dx_clip_space_def ? 0.0f : -1.0f) && z <= 1.0f)) {
         vertices_ok = false;
         break;
       }
-      float z = pa_cl_vte_cntl.vtx_z_fmt ? position[2] : position[2] / position[3];
-      if (!(z >= (pa_cl_clip_cntl.dx_clip_space_def ? 0.0f : -1.0f) && z <= 1.0f)) {
-        vertices_ok = false;
-        break;
+    }
+    if (z_known) {
+      z = z * viewport_z_scale + viewport_z_offset;
+      if (i == 0) {
+        z_value = z;
+      } else if (z != z_value) {
+        z_constant = false;
       }
+    } else {
+      z_constant = false;
     }
     x = x * viewport_x_scale + viewport_x_offset + vertex_x_offset;
     y = y * viewport_y_scale + viewport_y_offset + vertex_y_offset;
@@ -572,7 +637,8 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
   }
   shader_interpreter_.SetExportSink(nullptr);
   if (!vertices_ok) {
-    return 0;
+    constant_interpolator_mask_ = 0;
+    return false;
   }
 
   // The polygon: the triangle; for a rectangle, the parallelogram completed by mirroring the
@@ -620,47 +686,125 @@ uint32_t DrawExtentEstimator::GetFullCoverageHeight(const Shader& vertex_shader,
     }
     if (!(cross_min >= 0.0 || cross_max <= 0.0)) {
       // Concave or self-intersecting (or NaN).
-      return 0;
+      return false;
     }
   }
-
-  // The convex polygon contains the rectangle [0, width] x [0, height] if it contains its four
-  // corners (and isn't degenerate). Sample positions are strictly inside the pixel rectangle, so
-  // the corners being on the polygon's edges is fine regardless of the fill rules. For each edge
-  // (a half-plane), the top corners (x, 0) must be inside, and the bottom corners (x, height)
-  // give a linear bound on the height.
   double area2 = 0.0;
+  bool axis_aligned = vertex_count == 4;
   for (uint32_t i = 0; i < vertex_count; ++i) {
     const double* p0 = vertices[i];
     const double* p1 = vertices[(i + 1) % vertex_count];
     area2 += p0[0] * p1[1] - p1[0] * p0[1];
+    if (p1[0] != p0[0] && p1[1] != p0[1]) {
+      axis_aligned = false;
+    }
   }
   if (!(std::fabs(area2) > 0.0)) {
-    return 0;
+    return false;
   }
-  double orientation = area2 > 0.0 ? 1.0 : -1.0;
-  double height = double(max_height);
-  const double corner_xs[2] = {0.0, double(width)};
-  for (uint32_t i = 0; i < vertex_count; ++i) {
-    const double* p0 = vertices[i];
-    const double* p1 = vertices[(i + 1) % vertex_count];
-    double ex = p1[0] - p0[0], ey = p1[1] - p0[1];
-    for (double corner_x : corner_xs) {
-      // Inside if (ex * (y - p0.y) - ey * (x - p0.x)) * orientation >= 0, or a * y + b >= 0.
-      double a = ex * orientation;
-      double b = (-ex * p0[1] - ey * (corner_x - p0[0])) * orientation;
-      if (!(b >= 0.0)) {
-        return 0;
-      }
-      if (a < 0.0) {
-        height = std::min(height, -b / a);
+
+  // Sample positions are strictly inside the pixel squares, so a closed convex polygon containing
+  // the corners of a rectangle of pixels covers all their samples regardless of the fill rules.
+  double covered_left, covered_top, covered_right, covered_bottom;
+  if (axis_aligned) {
+    // The rectangle itself, within the clip rectangle.
+    covered_left = covered_right = vertices[0][0];
+    covered_top = covered_bottom = vertices[0][1];
+    for (uint32_t i = 1; i < vertex_count; ++i) {
+      covered_left = std::min(covered_left, vertices[i][0]);
+      covered_right = std::max(covered_right, vertices[i][0]);
+      covered_top = std::min(covered_top, vertices[i][1]);
+      covered_bottom = std::max(covered_bottom, vertices[i][1]);
+    }
+    covered_left = std::max(covered_left, clip_left);
+    covered_top = std::max(covered_top, clip_top);
+    covered_right = std::min(covered_right, clip_right);
+    covered_bottom = std::min(covered_bottom, clip_bottom);
+  } else {
+    // The band from the top of the clip rectangle at its full width: for each edge (a half-plane),
+    // the top corners must be inside, and the bottom corners give a linear bound on the bottom.
+    double orientation = area2 > 0.0 ? 1.0 : -1.0;
+    covered_left = clip_left;
+    covered_right = clip_right;
+    covered_top = clip_top;
+    covered_bottom = clip_bottom;
+    const double corner_xs[2] = {clip_left, clip_right};
+    for (uint32_t i = 0; i < vertex_count; ++i) {
+      const double* p0 = vertices[i];
+      const double* p1 = vertices[(i + 1) % vertex_count];
+      double ex = p1[0] - p0[0], ey = p1[1] - p0[1];
+      for (double corner_x : corner_xs) {
+        // Inside if (ex * (y - p0.y) - ey * (x - p0.x)) * orientation >= 0, or a * y + b >= 0.
+        double a = ex * orientation;
+        double b = (-ex * p0[1] - ey * (corner_x - p0[0])) * orientation;
+        if (!(a * covered_top + b >= 0.0)) {
+          return false;
+        }
+        if (a < 0.0) {
+          covered_bottom = std::min(covered_bottom, -b / a);
+        }
       }
     }
   }
-  if (!(height >= 1.0)) {
-    return 0;
+  if (!std::isfinite(covered_left) || !std::isfinite(covered_top) ||
+      !std::isfinite(covered_right) || !std::isfinite(covered_bottom)) {
+    return false;
   }
-  return uint32_t(std::floor(height));
+  // A pixel is covered if its whole square is: the first fully inside column and row, and the last.
+  double left = std::ceil(covered_left), top = std::ceil(covered_top);
+  double right = std::floor(covered_right), bottom = std::floor(covered_bottom);
+  if (!(right > left && bottom > top && left >= 0.0 && top >= 0.0 && right <= double(width) &&
+        bottom <= double(height))) {
+    return false;
+  }
+  rectangle_out.x = uint32_t(left);
+  rectangle_out.y = uint32_t(top);
+  rectangle_out.width = uint32_t(right - left);
+  rectangle_out.height = uint32_t(bottom - top);
+  if (z_constant) {
+    constant_z_out = z_value;
+  }
+  return true;
+}
+
+bool DrawExtentEstimator::GetConstantPixelShaderOutputs(const Shader& pixel_shader,
+                                                        float colors_out[4][4],
+                                                        uint32_t& written_mask_out) {
+  SCOPE_profile_cpu_f("gpu");
+
+  const RegisterFile& regs = register_file_;
+
+  written_mask_out = 0;
+  assert_true(pixel_shader.type() == xenos::ShaderType::kPixel);
+  assert_true(pixel_shader.is_ucode_analyzed());
+  if (!ShaderInterpreter::CanInterpretShader(pixel_shader) || pixel_shader.kills_pixels() ||
+      pixel_shader.memexport_eM_written()) {
+    return false;
+  }
+  // Nothing varying from the rasterizer may be read: only interpolators that are constant across
+  // the primitive, which go to the input registers of the same index.
+  uint32_t param_gen_pos = UINT32_MAX;
+  uint32_t interpolator_mask = pixel_shader.GetInterpolatorInputMask(
+      regs.Get<reg::SQ_PROGRAM_CNTL>(), regs.Get<reg::SQ_CONTEXT_MISC>(), param_gen_pos);
+  if ((interpolator_mask & ~constant_interpolator_mask_) || param_gen_pos != UINT32_MAX) {
+    return false;
+  }
+  shader_interpreter_.SetShader(pixel_shader);
+  float* temp_registers = shader_interpreter_.temp_registers();
+  for (uint32_t i = 0; i < 16; ++i) {
+    if (interpolator_mask & (uint32_t(1) << i)) {
+      std::memcpy(temp_registers + i * 4, constant_interpolators_[i], sizeof(float) * 4);
+    }
+  }
+  ColorExportSink color_export_sink;
+  shader_interpreter_.SetExportSink(&color_export_sink);
+  shader_interpreter_.Execute();
+  shader_interpreter_.SetExportSink(nullptr);
+  for (uint32_t i = 0; i < 4; ++i) {
+    std::memcpy(colors_out[i], color_export_sink.color(i), sizeof(float) * 4);
+  }
+  written_mask_out = color_export_sink.written_mask();
+  return true;
 }
 
 }  // namespace rex::graphics
