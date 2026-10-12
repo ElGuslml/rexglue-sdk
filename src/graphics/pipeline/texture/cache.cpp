@@ -479,6 +479,12 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
     if (!PrepareTextureLoad(*texture, pending_load, pending_ranges, pending_range_count)) {
       return;
     }
+    if (TryLoadTextureDataFromResolveCache(*texture, pending_load.load_base,
+                                           pending_load.load_mips)) {
+      texture->MakeUpToDateAndWatch(global_critical_region_.Acquire());
+      texture->LogAction("Loaded from a host resolve copy");
+      return;
+    }
     pending_texture_loads.push_back(pending_load);
     for (size_t i = 0; i < pending_range_count; ++i) {
       pending_shared_memory_ranges.push_back(pending_ranges[i]);
@@ -885,6 +891,12 @@ bool TextureCache::LoadTextureData(Texture& texture) {
   PendingSharedMemoryRange pending_ranges[2];
   size_t pending_range_count = 0;
   if (!PrepareTextureLoad(texture, pending_load, pending_ranges, pending_range_count)) {
+    return true;
+  }
+  if (TryLoadTextureDataFromResolveCache(texture, pending_load.load_base,
+                                         pending_load.load_mips)) {
+    texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
+    texture.LogAction("Loaded from a host resolve copy");
     return true;
   }
 

@@ -18,6 +18,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -80,6 +81,26 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // Performs the resolve to a shared memory area according to the current
   // register values, and also clears the render targets if needed. Must be in a
   // frame for calling.
+  void ClearCache() override;
+
+  // Lazy resolves (d3d12_lazy_resolve): fills a tiled 2D texture without mips
+  // by copying from the host render target copies of the resolves that wrote
+  // its memory, if they cover all of it. The texture's resource is transitioned
+  // to the copy destination state from resource_state_before. Returns false,
+  // without touching anything, if it must be loaded from the shared memory.
+  struct LazyTextureInfo {
+    uint32_t base_address;
+    uint32_t size_bytes;
+    uint32_t pitch_pixels;
+    uint32_t width;
+    uint32_t height;
+    xenos::TextureFormat format;
+    bool scaled;
+    ID3D12Resource* resource;
+    D3D12_RESOURCE_STATES resource_state_before;
+  };
+  bool LoadTextureFromLazyResolves(const LazyTextureInfo& info);
+
   bool Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
                uint32_t& written_length_out);
@@ -656,6 +677,83 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
+  // Lazy resolves: instead of dumping the render target to the EDRAM buffer
+  // and copying it to the shared memory, the resolved rectangle is copied to a
+  // host render target kept aside, textures sampled from the destination are
+  // filled by copying from it, and the shared memory is written only when
+  // something else requests the destination (MaterializeLazyResolves).
+  struct LazyResolve {
+    uint64_t id;
+    // Destination in the guest memory (ResolveInfo::copy_dest_*).
+    uint32_t dest_extent_start;
+    uint32_t dest_extent_length;
+    uint32_t dest_base;
+    xenos::TextureFormat dest_format;
+    uint32_t dest_pitch_pixels;
+    uint32_t dest_bpp_log2;
+    // The resolved rectangle: origin in destination texels relative to
+    // dest_base, origin in the source render target (unscaled pixels), size.
+    uint32_t dest_x, dest_y;
+    uint32_t source_x, source_y;
+    uint32_t width, height;
+    bool scaled;
+    // The copy of the source render target region, in a render target with
+    // the same key, and what's needed to do the resolve from it later.
+    RenderTarget* cache_render_target = nullptr;
+    ResolveCopyDumpRectangle dump_rectangle = ResolveCopyDumpRectangle(nullptr, 0, 0, 0, 0);
+    uint32_t dump_base;
+    uint32_t dump_row_length_used;
+    uint32_t dump_pitch;
+    draw_util::ResolveCopyShaderIndex copy_shader;
+    draw_util::ResolveCopyShaderConstants copy_constants;
+    uint32_t copy_group_count_x, copy_group_count_y;
+    // The CPU wrote some of the destination after the resolve: the shared
+    // memory must get the resolve and then the CPU data, as it normally would.
+    bool cpu_dirty;
+  };
+  struct LazyRenderTarget {
+    std::unique_ptr<RenderTarget> render_target;
+    bool in_use;
+  };
+  bool TryLazyResolve(const draw_util::ResolveInfo& resolve_info,
+                      draw_util::ResolveCopyShaderIndex copy_shader,
+                      const draw_util::ResolveCopyShaderConstants& copy_constants,
+                      uint32_t copy_group_count_x, uint32_t copy_group_count_y,
+                      bool draw_resolution_scaled, D3D12SharedMemory& shared_memory,
+                      D3D12TextureCache& texture_cache);
+  RenderTarget* AcquireLazyRenderTarget(RenderTargetKey key);
+  void ReleaseLazyRenderTarget(RenderTarget* render_target);
+  // Writes the pending resolves overlapping the range to the shared memory, in
+  // the order they were done.
+  void MaterializeLazyResolves(uint32_t start, uint32_t length);
+  void MaterializeLazyResolve(const LazyResolve& lazy_resolve);
+  void DropAllLazyResolves();
+  static void LazyResolveRangeRequestThunk(void* context, uint32_t start, uint32_t length);
+  static void LazyResolveGlobalWatchThunk(
+      const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
+      uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu);
+  // The copying part of Resolve (after the render targets have been dumped to
+  // the EDRAM buffer).
+  bool PerformResolveCopy(draw_util::ResolveCopyShaderIndex copy_shader,
+                          const draw_util::ResolveCopyShaderConstants& copy_constants,
+                          uint32_t copy_group_count_x, uint32_t copy_group_count_y,
+                          bool draw_resolution_scaled, uint32_t copy_dest_base,
+                          uint32_t copy_dest_extent_start, uint32_t copy_dest_extent_length,
+                          D3D12SharedMemory& shared_memory, D3D12TextureCache& texture_cache);
+  std::mutex lazy_resolve_mutex_;
+  std::vector<LazyResolve> lazy_resolves_;
+  uint64_t lazy_resolve_next_id_ = 1;
+  std::vector<LazyRenderTarget> lazy_render_targets_;
+  D3D12SharedMemory* lazy_shared_memory_ = nullptr;
+  D3D12TextureCache* lazy_texture_cache_ = nullptr;
+  SharedMemory::GlobalWatchHandle lazy_global_watch_handle_ = nullptr;
+  bool lazy_materializing_ = false;
+  uint64_t lazy_resolve_count_ = 0;
+  uint64_t lazy_load_count_ = 0;
+  uint64_t lazy_materialize_count_ = 0;
+
+  // Dumps dump_rectangles_ (within the span) to the EDRAM buffer.
+  bool DumpRectangles(uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_pitch);
   bool DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
                          uint32_t dump_pitch);
 

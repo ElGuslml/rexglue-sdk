@@ -521,6 +521,14 @@ class TextureCache {
     return load_shader_info_[load_shader_index];
   }
   bool LoadTextureData(Texture& texture);
+  // Writes the texture from host copies of resolved render targets kept outside
+  // the shared memory, if the implementation has them for the whole texture
+  // (see D3D12RenderTargetCache::LoadTextureFromLazyResolves). Returns false if
+  // the texture must be loaded from the shared memory normally.
+  virtual bool TryLoadTextureDataFromResolveCache(Texture& /*texture*/, bool /*load_base*/,
+                                                  bool /*load_mips*/) {
+    return false;
+  }
   // Writes the texture data (for base, mips or both - but not neither) from the
   // shared memory or the scaled resolve memory. The shared memory management is
   // done outside this function, the implementation just needs to load the data
