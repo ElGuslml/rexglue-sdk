@@ -1377,13 +1377,24 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
   return copied && cleared;
 }
 
+void VulkanRenderTargetCache::ClearHostRenderTargetRectangle(RenderTarget* render_target,
+                                                             const Transfer::Rectangle& rectangle,
+                                                             uint64_t guest_value) {
+  static const std::vector<Transfer> kNoTransfers;
+  PerformTransfersAndResolveClears(1, &render_target, &kNoTransfers, &guest_value, &rectangle);
+}
+
 bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
                                      reg::RB_DEPTHCONTROL normalized_depth_control,
                                      uint32_t normalized_color_mask, const Shader& vertex_shader,
-                                     const Shader* pixel_shader) {
+                                     const Shader* pixel_shader, bool* draw_done_as_clear_out) {
   if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
-                                 normalized_color_mask, vertex_shader, pixel_shader)) {
+                                 normalized_color_mask, vertex_shader, pixel_shader,
+                                 draw_done_as_clear_out)) {
     return false;
+  }
+  if (draw_done_as_clear_out && *draw_done_as_clear_out) {
+    return true;
   }
 
   auto rb_surface_info = register_file().Get<reg::RB_SURFACE_INFO>();

@@ -2364,9 +2364,15 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
   uint32_t normalized_color_mask =
       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
                    : 0;
+  bool draw_done_as_clear = false;
   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
-                                    normalized_color_mask, *vertex_shader, pixel_shader)) {
+                                    normalized_color_mask, *vertex_shader, pixel_shader,
+                                    &draw_done_as_clear)) {
     return false;
+  }
+  if (draw_done_as_clear) {
+    // Written as clears of the render targets owning the EDRAM, nothing to draw.
+    return true;
   }
 
   // Create the pipeline (for this, need the actually used render target formats

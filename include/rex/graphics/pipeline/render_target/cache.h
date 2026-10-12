@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -171,11 +172,14 @@ class RenderTargetCache {
 
   virtual void BeginFrame();
 
-  // pixel_shader may be null if the draw has no pixel shader; it is only used to find out whether
-  // the draw replaces every sample of the render targets it covers.
+  // pixel_shader may be null if the draw has no pixel shader; it is used to find out whether the
+  // draw replaces every sample of the render targets it covers, and what it writes. If
+  // draw_done_as_clear_out is given, the draw may be performed entirely here as clears of the host
+  // render targets currently owning the EDRAM it covers (render_target_draw_clears), in which case
+  // it is set to true and the caller must not draw.
   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
                       uint32_t normalized_color_mask, const Shader& vertex_shader,
-                      const Shader* pixel_shader);
+                      const Shader* pixel_shader, bool* draw_done_as_clear_out = nullptr);
 
   // Returns bits where 0 is whether a depth render target is currently bound on
   // the host and 1... are whether the same applies to color render targets, and
@@ -650,6 +654,25 @@ class RenderTargetCache {
                                             uint32_t normalized_color_mask,
                                             const Shader* pixel_shader) const;
 
+  // For a draw that writes constant values to every sample of the coverage
+  // rectangle (in pixels of the draw's surface configuration) of all its used
+  // render targets (keys in rt_keys indexed by the bit), writes those values
+  // into the host render targets currently owning that EDRAM instead, without
+  // changing the ownership (so no transfers are needed in either direction).
+  // Returns false, having done nothing, if the values aren't constant or the
+  // EDRAM region can't be expressed as rectangles of the current owners.
+  bool TryDrawAsClear(uint32_t depth_and_color_rts_used_bits, const RenderTargetKey* rt_keys,
+                      const Transfer::Rectangle& coverage, const std::optional<float>& constant_z,
+                      reg::RB_DEPTHCONTROL normalized_depth_control, const Shader& vertex_shader,
+                      const Shader* pixel_shader);
+
+  // Writes the guest-packed value (depth in bits 8:31 and stencil in 0:7, or
+  // the color in the render target's format, 32 or 64 bits) to every sample of
+  // the rectangle (in unscaled pixels) of the host render target.
+  virtual void ClearHostRenderTargetRectangle(RenderTarget* render_target,
+                                              const Transfer::Rectangle& rectangle,
+                                              uint64_t guest_value) = 0;
+
   bool WouldOwnershipChangeRequireTransfers(RenderTargetKey dest,
                                             uint32_t start_tiles_base_relative,
                                             uint32_t length_tiles) const;
@@ -670,6 +693,15 @@ class RenderTargetCache {
   // since standard containers use dynamic allocation for elements, though
   // changes to this throughout a frame are pretty rare.
   std::map<uint32_t, OwnershipRange> ownership_ranges_;
+
+  // Temporary storage for TryDrawAsClear: a render target, a rectangle and a
+  // value per clear.
+  struct DrawClearScratch {
+    RenderTarget* render_target;
+    Transfer::Rectangle rectangle;
+    uint64_t value;
+  };
+  std::vector<DrawClearScratch> draw_clear_scratch_;
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.
