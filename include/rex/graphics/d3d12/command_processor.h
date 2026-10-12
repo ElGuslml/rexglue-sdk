@@ -67,6 +67,8 @@ class D3D12CommandProcessor : public CommandProcessor {
     return deferred_command_list_;
   }
 
+  D3D12RenderTargetCache& GetD3D12RenderTargetCache() { return *render_target_cache_; }
+
   uint64_t GetCurrentSubmission() const { return submission_current_; }
   uint64_t GetCompletedSubmission() const { return submission_completed_; }
 

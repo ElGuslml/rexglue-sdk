@@ -173,6 +173,8 @@ class D3D12TextureCache final : public TextureCache {
   std::unique_ptr<Texture> CreateTexture(TextureKey key) override;
 
   // This binds pipelines, allocates descriptors, and copies!
+  bool TryLoadTextureDataFromResolveCache(Texture& texture, bool load_base,
+                                          bool load_mips) override;
   bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                              bool load_mips) override;
 

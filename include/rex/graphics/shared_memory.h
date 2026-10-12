@@ -79,6 +79,15 @@ class SharedMemory {
   bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
   bool RequestRange(uint32_t start, uint32_t length);
 
+  // Called at the beginning of RequestRanges for every requested range, before
+  // anything is uploaded, so that data kept outside the shared memory (host
+  // copies of resolved render targets) can be written into it first.
+  typedef void (*RangeRequestCallback)(void* context, uint32_t start, uint32_t length);
+  void SetRangeRequestCallback(RangeRequestCallback callback, void* context) {
+    range_request_callback_ = callback;
+    range_request_callback_context_ = context;
+  }
+
   // Marks the range and, if not exact_range, potentially its surroundings
   // (to up to the first GPU-written page, as an access violation exception
   // count optimization) as modified by the CPU, also invalidating GPU-written
@@ -94,6 +103,12 @@ class SharedMemory {
   // the pages they touch, the CPU data is properly loaded to the unmodified
   // regions in those pages.
   void RangeWrittenByGpu(uint32_t start, uint32_t length);
+
+ private:
+  RangeRequestCallback range_request_callback_ = nullptr;
+  void* range_request_callback_context_ = nullptr;
+
+ public:
 
  protected:
   SharedMemory(memory::Memory& memory);

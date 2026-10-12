@@ -1557,6 +1557,36 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
   return std::unique_ptr<Texture>(new D3D12Texture(*this, key, resource.Get(), resource_state));
 }
 
+bool D3D12TextureCache::TryLoadTextureDataFromResolveCache(Texture& texture, bool load_base,
+                                                           bool load_mips) {
+  const TextureKey& key = texture.key();
+  // Only the base level exists in the textures this can fill, so a pending
+  // mips load has nothing to do.
+  if (!load_base || (load_mips && key.mip_max_level != 0)) {
+    return false;
+  }
+  if (key.dimension != xenos::DataDimension::k2DOrStacked || key.GetDepthOrArraySize() != 1 ||
+      !key.tiled || key.mip_max_level != 0 || key.scaled_resolve != IsDrawResolutionScaled()) {
+    return false;
+  }
+  auto& d3d12_texture = static_cast<D3D12Texture&>(texture);
+  D3D12RenderTargetCache::LazyTextureInfo info;
+  info.base_address = key.base_page << 12;
+  info.size_bytes = texture.GetGuestBaseSize();
+  info.pitch_pixels = key.pitch << 5;
+  info.width = key.GetWidth();
+  info.height = key.GetHeight();
+  info.format = key.format;
+  info.scaled = key.scaled_resolve != 0;
+  info.resource = d3d12_texture.resource();
+  info.resource_state_before = d3d12_texture.SetResourceState(D3D12_RESOURCE_STATE_COPY_DEST);
+  if (!command_processor_.GetD3D12RenderTargetCache().LoadTextureFromLazyResolves(info)) {
+    d3d12_texture.SetResourceState(info.resource_state_before);
+    return false;
+  }
+  return true;
+}
+
 bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                               bool load_mips) {
   D3D12Texture& d3d12_texture = static_cast<D3D12Texture&>(texture);

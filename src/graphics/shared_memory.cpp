@@ -341,6 +341,14 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
   if (ranges == nullptr || !count) {
     return true;
   }
+  if (range_request_callback_) {
+    for (size_t i = 0; i < count; ++i) {
+      if (ranges[i].second) {
+        range_request_callback_(range_request_callback_context_, ranges[i].first,
+                                ranges[i].second);
+      }
+    }
+  }
 
   // Some texture or buffer is empty, for example - safe to draw in this case.
   std::vector<std::pair<uint32_t, uint32_t>> merged_ranges;
