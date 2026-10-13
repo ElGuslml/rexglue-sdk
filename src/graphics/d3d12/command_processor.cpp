@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstring>
 #include <sstream>
@@ -192,21 +193,23 @@ bool D3D12CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffe
       sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished;
   bool is_end = is_end_via_z_pass || is_end_via_z_fail;
 
-  if (!is_end) {
-    if (active_occlusion_query_.valid &&
-        active_occlusion_query_.sample_count_address != sample_count_addr) {
-      DisableHostOcclusionQueries();
-      return write_fallback_result();
-    }
+  // D3D may point the begin and the end events at different structures (begin = end + 32 in some
+  // titles) and computes the result as end - begin, so the end pairs with the begin whatever its
+  // address, and the begin counts are zero. With predicated tiling, each tile's pass begins and
+  // ends the query on that tile's structures, but D3D marks only the last tile's end: an event
+  // while the guest's query is open ends it. Whether it is open is tracked apart from the host
+  // query, which ending a submission ends early: such an end must not be taken for a begin.
+  if (!is_end && !guest_occlusion_query_open_) {
+    guest_occlusion_query_open_ = true;
     if (!BeginGuestOcclusionQuery(sample_count_addr)) {
       return write_fallback_result();
     }
+    std::memset(sample_counts, 0, sizeof(xenos::xe_gpu_depth_sample_counts));
     return true;
   }
 
-  if (!active_occlusion_query_.valid ||
-      active_occlusion_query_.sample_count_address != sample_count_addr) {
-    DisableHostOcclusionQueries();
+  guest_occlusion_query_open_ = false;
+  if (!active_occlusion_query_.valid) {
     return write_fallback_result();
   }
 
@@ -4814,6 +4817,7 @@ ID3D12Resource* D3D12CommandProcessor::RequestReadbackBuffer(uint32_t size) {
 
 bool D3D12CommandProcessor::InitializeOcclusionQueryResources() {
   active_occlusion_query_ = {};
+  guest_occlusion_query_open_ = false;
   occlusion_query_cursor_ = 0;
   occlusion_query_resources_available_ = false;
   occlusion_query_heap_.Reset();
@@ -4989,12 +4993,16 @@ void D3D12CommandProcessor::WriteGuestOcclusionResult(
   uint32_t clamped = samples > uint64_t(UINT32_MAX) ? UINT32_MAX : uint32_t(samples);
   sample_counts->Total_A = clamped;
   sample_counts->Total_B = 0;
-  sample_counts->ZPass_A = clamped;
-  sample_counts->ZPass_B = 0;
   sample_counts->ZFail_A = 0;
   sample_counts->ZFail_B = 0;
   sample_counts->StencilFail_A = 0;
   sample_counts->StencilFail_B = 0;
+  // D3D takes the query as finished as soon as ZPass_A or ZPass_B no longer holds the end marker,
+  // and then adds both, possibly while this thread is writing them: write the pair last, with one
+  // store (ZPass_A = the samples in the low half, ZPass_B = 0).
+  uint64_t zpass = clamped;
+  std::atomic_thread_fence(std::memory_order_release);
+  std::memcpy(static_cast<void*>(&sample_counts->ZPass_A), &zpass, sizeof(zpass));
 }
 
 void D3D12CommandProcessor::WriteGammaRampSRV(bool is_pwl,

@@ -741,6 +741,8 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t host_index = UINT32_MAX;
     bool valid = false;
   } active_occlusion_query_;
+  // The guest has begun a query and not ended it yet (the host query may have been ended early).
+  bool guest_occlusion_query_open_ = false;
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;
