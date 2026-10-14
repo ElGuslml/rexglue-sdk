@@ -409,7 +409,19 @@ class SpirvShaderTranslator : public ShaderTranslator {
         native_2x_msaa_no_attachments_(native_2x_msaa_no_attachments),
         edram_fragment_shader_interlock_(edram_fragment_shader_interlock),
         draw_resolution_scale_x_(draw_resolution_scale_x ? draw_resolution_scale_x : 1),
-        draw_resolution_scale_y_(draw_resolution_scale_y ? draw_resolution_scale_y : 1) {}
+        draw_resolution_scale_y_(draw_resolution_scale_y ? draw_resolution_scale_y : 1),
+        shader_resolution_scale_x_(float(draw_resolution_scale_x_)),
+        shader_resolution_scale_y_(float(draw_resolution_scale_y_)) {}
+
+  // A resolution scale that need not be a whole number, for a host renderer without EDRAM emulation
+  // (NativeXRenderer: no fragment shader interlock, no memory export at a scale). It replaces the whole
+  // scale where the translated shaders revert it: the pixel position of parameter generation and the
+  // texel offsets and weights of resolution-scaled textures. 1 or more on each axis; call before
+  // translating.
+  void SetFractionalResolutionScale(float scale_x, float scale_y) {
+    shader_resolution_scale_x_ = scale_x > 1.0f ? scale_x : 1.0f;
+    shader_resolution_scale_y_ = scale_y > 1.0f ? scale_y : 1.0f;
+  }
 
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
@@ -758,6 +770,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   bool edram_fragment_shader_interlock_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
+  // The scale the shaders revert (SetFractionalResolutionScale); the whole scale otherwise.
+  float shader_resolution_scale_x_;
+  float shader_resolution_scale_y_;
 
   // Is currently writing the empty depth-only pixel shader, such as for depth
   // and stencil testing with fragment shader interlock.
