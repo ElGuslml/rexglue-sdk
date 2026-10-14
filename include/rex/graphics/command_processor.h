@@ -26,6 +26,7 @@
 #include <rex/graphics/xenos.h>
 #include <rex/memory.h>
 #include <rex/memory/ring_buffer.h>
+#include <rex/system/interfaces/graphics.h>
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
 #include <rex/ui/presenter.h>
@@ -89,6 +90,9 @@ class CommandProcessor {
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
+
+  // See system::IGraphicsSystem::SetDrawObserver.
+  void SetDrawObserver(system::GpuDrawObserver observer, void* user);
 
   virtual bool Initialize();
   virtual void Shutdown();
@@ -265,6 +269,12 @@ class CommandProcessor {
 
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;
+
+  // Draw observer (SetDrawObserver), and the physical address of the type-3 packet being executed,
+  // kept only while an observer is set.
+  std::atomic<system::GpuDrawObserver> draw_observer_{nullptr};
+  void* draw_observer_user_ = nullptr;
+  uint32_t observed_packet_address_ = 0;
 
   bool paused_ = false;
 

@@ -31,6 +31,28 @@ class KernelState;
 
 namespace rex::system {
 
+// A draw packet the command processor executed, for tools that compare the guest's GPU state with
+// their own view of it (for example NativeXRenderer's observer). Plain data, so it crosses the GPU
+// plugin boundary; the pointers are valid only during the callback.
+struct GpuDrawInfo {
+  uint32_t packet_address;  // physical address of the draw packet's type-3 header
+  uint32_t opcode;          // PM4_DRAW_INDX or PM4_DRAW_INDX_2
+  const uint32_t* registers;  // the register file after the packet (VGT_DRAW_INITIATOR included)
+  uint32_t register_count;
+  uint64_t bin_mask;    // predicated tiling: the packet ran because bin_mask & bin_select != 0
+  uint64_t bin_select;
+  bool issued;          // false if the draw was dropped (viz query kill, backend failure)
+  // The bound shaders (hash 0 if none). The constant maps are
+  // rex::graphics::Shader::ConstantRegisterMap, null until the backend analyzed the shader.
+  uint64_t vertex_shader_hash;
+  uint64_t pixel_shader_hash;
+  const void* vertex_shader_constants;
+  const void* pixel_shader_constants;
+  uint8_t vertex_shader_memexport;  // eM# written by memexport (0 = none)
+  uint8_t pixel_shader_memexport;
+};
+using GpuDrawObserver = void (*)(void* user, const GpuDrawInfo& info);
+
 class IGraphicsSystem {
  public:
   virtual ~IGraphicsSystem() = default;
@@ -69,6 +91,14 @@ class IGraphicsSystem {
   virtual void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) {
     (void)ptr;
     (void)block_size_log2;
+  }
+
+  // Called on the GPU thread for every draw packet the command processor executes; nullptr turns it
+  // off. Off by default, and free when off. Returns false if the system has no command processor.
+  virtual bool SetDrawObserver(GpuDrawObserver observer, void* user) {
+    (void)observer;
+    (void)user;
+    return false;
   }
 
   // Persistent shader/pipeline storage under the cache root. Default: none.
