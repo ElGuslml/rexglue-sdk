@@ -321,6 +321,14 @@ bool GraphicsSystem::SetOcclusionQueryResolver(system::OcclusionQueryResolver re
   return true;
 }
 
+bool GraphicsSystem::GetGammaRamp(system::GammaRamp& ramp) {
+  if (!command_processor_) {
+    return false;
+  }
+  command_processor_->GetGammaRamp(ramp);
+  return true;
+}
+
 void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   if (!interrupt_callback_) {
     return;
