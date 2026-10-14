@@ -101,6 +101,16 @@ class IGraphicsSystem {
     return false;
   }
 
+  // Host rendering on or off. Off, the command processor still executes every packet (registers,
+  // fences, interrupts, swaps, event writes) but draws nothing on the host: draws, clears and resolves
+  // are skipped, and occlusion queries report the fake sample count. For a renderer that draws the
+  // guest's frames itself from another source (NativeXRenderer). On by default; may be changed at any
+  // time. Returns false if the system has no command processor.
+  virtual bool SetHostRendering(bool enabled) {
+    (void)enabled;
+    return false;
+  }
+
   // Persistent shader/pipeline storage under the cache root. Default: none.
   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                        bool blocking) {

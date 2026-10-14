@@ -94,6 +94,10 @@ class CommandProcessor {
   // See system::IGraphicsSystem::SetDrawObserver.
   void SetDrawObserver(system::GpuDrawObserver observer, void* user);
 
+  // See system::IGraphicsSystem::SetHostRendering.
+  void SetHostRendering(bool enabled) { host_rendering_.store(enabled, std::memory_order_relaxed); }
+  bool host_rendering() const { return host_rendering_.load(std::memory_order_relaxed); }
+
   virtual bool Initialize();
   virtual void Shutdown();
 
@@ -273,6 +277,8 @@ class CommandProcessor {
   // Draw observer (SetDrawObserver), and the physical address of the type-3 packet being executed,
   // kept only while an observer is set.
   std::atomic<system::GpuDrawObserver> draw_observer_{nullptr};
+  // Off: packets run for synchronization only (SetHostRendering).
+  std::atomic<bool> host_rendering_{true};
   void* draw_observer_user_ = nullptr;
   uint32_t observed_packet_address_ = 0;
 
