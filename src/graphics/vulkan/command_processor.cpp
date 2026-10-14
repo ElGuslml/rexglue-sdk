@@ -649,7 +649,8 @@ void VulkanCommandProcessor::InitializeShaderStorage(const std::filesystem::path
 
 bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* reader,
                                                                 uint32_t packet, uint32_t count) {
-  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_) {
+  if (!REXCVAR_GET(occlusion_query_enable) || !occlusion_query_resources_available_ ||
+      !host_rendering()) {
     return CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
   }
 
