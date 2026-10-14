@@ -117,6 +117,19 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
 
 CommandProcessor::~CommandProcessor() = default;
 
+void CommandProcessor::GetGammaRamp(system::GammaRamp& ramp) {
+  std::lock_guard<std::mutex> gamma_ramp_lock(gamma_ramp_mutex_);
+  for (uint32_t i = 0; i < 256; ++i) {
+    ramp.table[i] = gamma_ramp_256_entry_table_[i].value;
+  }
+  for (uint32_t i = 0; i < 128; ++i) {
+    for (uint32_t j = 0; j < 3; ++j) {
+      ramp.pwl[i][j] = gamma_ramp_pwl_rgb_[i][j].value;
+    }
+  }
+  ramp.version = gamma_ramp_version_;
+}
+
 bool CommandProcessor::Initialize() {
   // Initialize the gamma ramps to their default (linear) values - taken from
   // what games set when starting with the sRGB (return value 1)
@@ -400,6 +413,8 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
         bool write_gamma_ramp_component = (regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] &
                                            (UINT32_C(1) << (2 - gamma_ramp_rw_component_))) != 0;
         if (write_gamma_ramp_component) {
+          std::lock_guard<std::mutex> gamma_ramp_lock(gamma_ramp_mutex_);
+          ++gamma_ramp_version_;
           reg::DC_LUT_30_COLOR& gamma_ramp_entry =
               gamma_ramp_256_entry_table_[gamma_ramp_rw_index.rw_index];
           // Bits 0:5 are hardwired to zero.
@@ -439,6 +454,8 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
         bool write_gamma_ramp_component = (regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] &
                                            (UINT32_C(1) << (2 - gamma_ramp_rw_component_))) != 0;
         if (write_gamma_ramp_component) {
+          std::lock_guard<std::mutex> gamma_ramp_lock(gamma_ramp_mutex_);
+          ++gamma_ramp_version_;
           reg::DC_LUT_PWL_DATA& gamma_ramp_entry =
               gamma_ramp_pwl_rgb_[gamma_ramp_rw_index_pwl][gamma_ramp_rw_component_];
           auto gamma_ramp_value = regs.Get<reg::DC_LUT_PWL_DATA>();
@@ -469,6 +486,8 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
         auto gamma_ramp_rw_index = regs.Get<reg::DC_LUT_RW_INDEX>();
         uint32_t gamma_ramp_write_enable_mask = regs[XE_GPU_REG_DC_LUT_WRITE_EN_MASK] & 0b111;
         if (gamma_ramp_write_enable_mask) {
+          std::lock_guard<std::mutex> gamma_ramp_lock(gamma_ramp_mutex_);
+          ++gamma_ramp_version_;
           reg::DC_LUT_30_COLOR& gamma_ramp_entry =
               gamma_ramp_256_entry_table_[gamma_ramp_rw_index.rw_index];
           auto gamma_ramp_value = regs.Get<reg::DC_LUT_30_COLOR>();

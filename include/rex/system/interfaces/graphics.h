@@ -58,6 +58,19 @@ using GpuDrawObserver = void (*)(void* user, const GpuDrawInfo& info);
 // number of samples that passed, at the guest's resolution, or false for the fake sample count.
 using OcclusionQueryResolver = bool (*)(void* user, uint32_t sample_count_address, uint64_t* samples);
 
+// The guest's display gamma ramp, as the GPU's display controller holds it (the DC_LUT registers) and the
+// command processor tracks it (see IGraphicsSystem::GetGammaRamp).
+struct GammaRamp {
+  // The 256-entry table (DC_LUT_30_COLOR): 10 bits per channel, blue in bits 0:9, green in 10:19, red in
+  // 20:29. Used for 8-bit front buffers.
+  uint32_t table[256];
+  // The piecewise linear ramp (DC_LUT_PWL_DATA), 128 entries of red, green and blue: base in bits 0:15,
+  // delta in bits 16:31. Used for 10-bit front buffers.
+  uint32_t pwl[128][3];
+  // Changes whenever the guest writes either of them.
+  uint64_t version;
+};
+
 class IGraphicsSystem {
  public:
   virtual ~IGraphicsSystem() = default;
@@ -124,6 +137,14 @@ class IGraphicsSystem {
   virtual bool SetOcclusionQueryResolver(OcclusionQueryResolver resolver, void* user) {
     (void)resolver;
     (void)user;
+    return false;
+  }
+
+  // The guest's current display gamma ramp, for a renderer that presents the guest's frames itself. The
+  // host presenters apply it to the front buffer; such a renderer has to as well. Safe from any thread.
+  // Returns false if the system has no command processor.
+  virtual bool GetGammaRamp(GammaRamp& ramp) {
+    (void)ramp;
     return false;
   }
 

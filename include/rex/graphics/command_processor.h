@@ -101,6 +101,8 @@ class CommandProcessor {
     occlusion_query_resolver_user_ = user;
     occlusion_query_resolver_.store(resolver, std::memory_order_release);
   }
+  // See system::IGraphicsSystem::GetGammaRamp. From any thread.
+  void GetGammaRamp(system::GammaRamp& ramp);
   bool host_rendering() const { return host_rendering_.load(std::memory_order_relaxed); }
 
   virtual bool Initialize();
@@ -305,6 +307,9 @@ class CommandProcessor {
   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};
   reg::DC_LUT_PWL_DATA gamma_ramp_pwl_rgb_[128][3] = {};
   uint32_t gamma_ramp_rw_component_ = 0;
+  // Guards the two ramps' entries against GetGammaRamp on other threads; the version counts the writes.
+  std::mutex gamma_ramp_mutex_;
+  uint64_t gamma_ramp_version_ = 0;
 };
 
 }  // namespace rex::graphics
