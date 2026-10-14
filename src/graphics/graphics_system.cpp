@@ -294,6 +294,15 @@ void GraphicsSystem::SetInterruptCallback(uint32_t callback, uint32_t user_data)
   REXGPU_INFO("SetInterruptCallback({:08X}, {:08X})", callback, user_data);
 }
 
+bool GraphicsSystem::SetDrawObserver(system::GpuDrawObserver observer, void* user) {
+  if (!command_processor_) {
+    return false;
+  }
+  command_processor_->SetDrawObserver(observer, user);
+  REXGPU_INFO("Draw observer {}", observer ? "set" : "cleared");
+  return true;
+}
+
 void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   if (!interrupt_callback_) {
     return;
