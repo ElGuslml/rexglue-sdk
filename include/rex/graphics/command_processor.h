@@ -96,6 +96,11 @@ class CommandProcessor {
 
   // See system::IGraphicsSystem::SetHostRendering.
   void SetHostRendering(bool enabled) { host_rendering_.store(enabled, std::memory_order_relaxed); }
+  // See system::IGraphicsSystem::SetOcclusionQueryResolver.
+  void SetOcclusionQueryResolver(system::OcclusionQueryResolver resolver, void* user) {
+    occlusion_query_resolver_user_ = user;
+    occlusion_query_resolver_.store(resolver, std::memory_order_release);
+  }
   bool host_rendering() const { return host_rendering_.load(std::memory_order_relaxed); }
 
   virtual bool Initialize();
@@ -279,6 +284,9 @@ class CommandProcessor {
   std::atomic<system::GpuDrawObserver> draw_observer_{nullptr};
   // Off: packets run for synchronization only (SetHostRendering).
   std::atomic<bool> host_rendering_{true};
+  // Answers occlusion queries the command processor has no host query for (SetOcclusionQueryResolver).
+  std::atomic<system::OcclusionQueryResolver> occlusion_query_resolver_{nullptr};
+  void* occlusion_query_resolver_user_ = nullptr;
   void* draw_observer_user_ = nullptr;
   uint32_t observed_packet_address_ = 0;
 
