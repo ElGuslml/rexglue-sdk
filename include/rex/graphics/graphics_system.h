@@ -77,6 +77,7 @@ class GraphicsSystem : public system::IGraphicsSystem {
   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
   bool SetDrawObserver(system::GpuDrawObserver observer, void* user) override;
   bool SetHostRendering(bool enabled) override;
+  bool SetOcclusionQueryResolver(system::OcclusionQueryResolver resolver, void* user) override;
   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);
 
   virtual void ClearCaches();

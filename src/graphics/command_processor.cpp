@@ -1327,7 +1327,32 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
 
   // Occlusion queries:
   // This command is send on query begin and end.
-  // As a workaround report some fixed amount of passed samples.
+  // A resolver (SetOcclusionQueryResolver) answers the ends, for a renderer that measured the query
+  // itself.
+  if (auto resolver = occlusion_query_resolver_.load(std::memory_order_acquire)) {
+    uint32_t sample_count_address = register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
+    auto* sample_counts = memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(sample_count_address);
+    uint64_t samples = 0;
+    if (sample_counts &&
+        (sample_counts->ZPass_A == kQueryFinished || sample_counts->ZPass_B == kQueryFinished ||
+         sample_counts->ZFail_A == kQueryFinished || sample_counts->ZFail_B == kQueryFinished) &&
+        resolver(occlusion_query_resolver_user_, sample_count_address, &samples)) {
+      uint32_t clamped = samples > uint64_t(UINT32_MAX) ? UINT32_MAX : uint32_t(samples);
+      sample_counts->Total_A = clamped;
+      sample_counts->Total_B = 0;
+      sample_counts->ZFail_A = 0;
+      sample_counts->ZFail_B = 0;
+      sample_counts->StencilFail_A = 0;
+      sample_counts->StencilFail_B = 0;
+      // D3D takes the query as finished as soon as ZPass_A or ZPass_B no longer holds the end marker,
+      // and then adds both: write the pair last, with one store (ZPass_A = the samples, ZPass_B = 0).
+      uint64_t zpass = clamped;
+      std::atomic_thread_fence(std::memory_order_release);
+      std::memcpy(static_cast<void*>(&sample_counts->ZPass_A), &zpass, sizeof(zpass));
+      return true;
+    }
+  }
+  // Otherwise, as a workaround, report some fixed amount of passed samples.
   auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
   if (fake_sample_count >= 0) {
     auto* pSampleCounts = memory_->TranslatePhysical<xe_gpu_depth_sample_counts*>(

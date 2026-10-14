@@ -53,6 +53,11 @@ struct GpuDrawInfo {
 };
 using GpuDrawObserver = void (*)(void* user, const GpuDrawInfo& info);
 
+// Answers a guest occlusion query that ended (see IGraphicsSystem::SetOcclusionQueryResolver):
+// sample_count_address is the physical address of the query's sample counts. Returns true with the
+// number of samples that passed, at the guest's resolution, or false for the fake sample count.
+using OcclusionQueryResolver = bool (*)(void* user, uint32_t sample_count_address, uint64_t* samples);
+
 class IGraphicsSystem {
  public:
   virtual ~IGraphicsSystem() = default;
@@ -103,11 +108,22 @@ class IGraphicsSystem {
 
   // Host rendering on or off. Off, the command processor still executes every packet (registers,
   // fences, interrupts, swaps, event writes) but draws nothing on the host: draws, clears and resolves
-  // are skipped, and occlusion queries report the fake sample count. For a renderer that draws the
-  // guest's frames itself from another source (NativeXRenderer). On by default; may be changed at any
-  // time. Returns false if the system has no command processor.
+  // are skipped, and occlusion queries report the fake sample count, or what the occlusion query
+  // resolver answers. For a renderer that draws the guest's frames itself from another source
+  // (NativeXRenderer). On by default; may be changed at any time. Returns false if the system has no
+  // command processor.
   virtual bool SetHostRendering(bool enabled) {
     (void)enabled;
+    return false;
+  }
+
+  // Called on the GPU thread when a guest occlusion query ends and the command processor has no host
+  // query for it (host rendering off, or host queries disabled), to answer it in place of the fake
+  // sample count. For a renderer that draws the guest's frames itself and measures the queries.
+  // nullptr turns it off. Returns false if the system has no command processor.
+  virtual bool SetOcclusionQueryResolver(OcclusionQueryResolver resolver, void* user) {
+    (void)resolver;
+    (void)user;
     return false;
   }
 
