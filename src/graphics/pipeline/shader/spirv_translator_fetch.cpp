@@ -813,6 +813,10 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           if (instr.attributes.unnormalized_coordinates) {
             size_needed_components |= 0b0011;
           }
+          // The width for the LOD of cube maps, computed in the shader (see the sampling below).
+          if (use_computed_lod && instr.opcode == ucode::FetchOpcode::kTextureFetch) {
+            size_needed_components |= 0b0001;
+          }
           // The size is not needed for face ID offset.
           size_needed_components &= 0b0011;
           break;
@@ -1459,8 +1463,17 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           // in getCompTexLOD, so not doing it here too for now. Apply the
           // gradient exponent biases from the word 4 of the fetch constant in
           // the future when it's handled in getCompTexLOD somehow.
+          // The LOD is applied as a scale of the gradients, 2^lod, so it is clamped first: a
+          // register LOD far outside the mip range (555307D5 sets 150 to read a cube map's
+          // smallest mip) makes the scale infinite, and an infinite scale times a zero derivative
+          // makes NaN gradients, which leave the sample undefined. Past +-32 the scaled gradients
+          // reach the first or the last mip of any texture already, unless the coordinate barely
+          // changes within the quad.
+          spv::Id lod_clamped = builder_->createTriBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, lod,
+              builder_->makeFloatConstant(-32.0f), builder_->makeFloatConstant(32.0f));
           spv::Id lod_gradient_scale = builder_->createUnaryBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2, lod);
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2, lod_clamped);
           switch (instr.dimension) {
             case xenos::FetchOpDimension::k1D: {
               spv::Id gradient_h_1d, gradient_v_1d;
@@ -1837,7 +1850,29 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           sample_result_signed =
               if_data_is_3d.createMergePhi(sample_result_signed_3d, sample_result_signed_stacked);
         } else {
-          if (use_computed_lod) {
+          spv::ImageOperandsMask sample_operands_mask = image_operands_mask;
+          if (use_computed_lod && instr.dimension == xenos::FetchOpDimension::kCube) {
+            // Cube maps are sampled with an explicit LOD computed here, not with gradients:
+            // NVIDIA's Vulkan driver returns garbage in one pixel of each quad when sampling a
+            // cube map with gradients, whatever they are (555307D5's ambient light). The
+            // direction's major axis is +-1, so within a face the length of its gradients is that
+            // of the face coordinates', which span the face's width in 2 units. The gradients
+            // include the LOD bias as a scale.
+            spv::Id gradient_length = builder_->createBinBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450NMax,
+                builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                                 GLSLstd450Length, gradients_h),
+                builder_->createUnaryBuiltinCall(type_float_, ext_inst_glsl_std_450_,
+                                                 GLSLstd450Length, gradients_v));
+            assert_true(size[0] != spv::NoResult);
+            spv::Id texels_per_unit = builder_->createNoContractionBinOp(
+                spv::OpFMul, type_float_, size[0], builder_->makeFloatConstant(0.5f));
+            texture_parameters.lod = builder_->createUnaryBuiltinCall(
+                type_float_, ext_inst_glsl_std_450_, GLSLstd450Log2,
+                builder_->createNoContractionBinOp(spv::OpFMul, type_float_, gradient_length,
+                                                   texels_per_unit));
+            sample_operands_mask = spv::ImageOperandsLodMask;
+          } else if (use_computed_lod) {
             texture_parameters.gradX = gradients_h;
             texture_parameters.gradY = gradients_v;
           }
@@ -1847,7 +1882,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           }
           texture_parameters.coords =
               builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
-          SampleTexture(texture_parameters, image_operands_mask, image_2d_array_or_cube_unsigned,
+          SampleTexture(texture_parameters, sample_operands_mask, image_2d_array_or_cube_unsigned,
                         image_2d_array_or_cube_signed, sampler, is_any_unsigned, is_any_signed,
                         sample_result_unsigned, sample_result_signed);
         }
