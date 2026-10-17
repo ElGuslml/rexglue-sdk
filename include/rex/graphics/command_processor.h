@@ -96,6 +96,12 @@ class CommandProcessor {
 
   // See system::IGraphicsSystem::SetHostRendering.
   void SetHostRendering(bool enabled) { host_rendering_.store(enabled, std::memory_order_relaxed); }
+  // See system::IGraphicsSystem::SetSignalGate.
+  void SetSignalGate(system::GpuSignalGate gate, void* user) {
+    signal_gate_user_ = user;
+    signal_gate_.store(gate, std::memory_order_release);
+  }
+
   // See system::IGraphicsSystem::SetOcclusionQueryResolver.
   void SetOcclusionQueryResolver(system::OcclusionQueryResolver resolver, void* user) {
     occlusion_query_resolver_user_ = user;
@@ -286,6 +292,15 @@ class CommandProcessor {
   std::atomic<system::GpuDrawObserver> draw_observer_{nullptr};
   // Off: packets run for synchronization only (SetHostRendering).
   std::atomic<bool> host_rendering_{true};
+  // Passed before every signal to the guest (SetSignalGate).
+  void PassSignalGate() {
+    if (auto gate = signal_gate_.load(std::memory_order_acquire)) {
+      gate(signal_gate_user_);
+    }
+  }
+  std::atomic<system::GpuSignalGate> signal_gate_{nullptr};
+  void* signal_gate_user_ = nullptr;
+
   // Answers occlusion queries the command processor has no host query for (SetOcclusionQueryResolver).
   std::atomic<system::OcclusionQueryResolver> occlusion_query_resolver_{nullptr};
   void* occlusion_query_resolver_user_ = nullptr;

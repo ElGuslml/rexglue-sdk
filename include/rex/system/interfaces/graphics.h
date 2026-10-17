@@ -58,6 +58,9 @@ using GpuDrawObserver = void (*)(void* user, const GpuDrawInfo& info);
 // number of samples that passed, at the guest's resolution, or false for the fake sample count.
 using OcclusionQueryResolver = bool (*)(void* user, uint32_t sample_count_address, uint64_t* samples);
 
+// Passed by the command processor before it signals the guest (see IGraphicsSystem::SetSignalGate).
+using GpuSignalGate = void (*)(void* user);
+
 // The guest's display gamma ramp, as the GPU's display controller holds it (the DC_LUT registers) and the
 // command processor tracks it (see IGraphicsSystem::GetGammaRamp).
 struct GammaRamp {
@@ -136,6 +139,19 @@ class IGraphicsSystem {
   // nullptr turns it off. Returns false if the system has no command processor.
   virtual bool SetOcclusionQueryResolver(OcclusionQueryResolver resolver, void* user) {
     (void)resolver;
+    (void)user;
+    return false;
+  }
+
+  // Called on the GPU thread before the command processor does anything the guest can see as the GPU's
+  // progress: a write to guest memory (EVENT_WRITE_SHD fences, MEM_WRITE, COND_WRITE, REG_TO_MEM,
+  // EVENT_WRITE_EXT and _ZPD, scratch register and read pointer write-backs) or an interrupt (INTERRUPT,
+  // XE_SWAP). A renderer that draws the guest's frames on a thread of its own, from guest memory, waits
+  // there until it has consumed what the guest submitted so far: the guest then never sees the GPU further
+  // along than that renderer, and does not reuse memory it still reads. nullptr turns it off. Returns false
+  // if the system has no command processor.
+  virtual bool SetSignalGate(GpuSignalGate gate, void* user) {
+    (void)gate;
     (void)user;
     return false;
   }

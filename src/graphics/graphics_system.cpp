@@ -321,6 +321,15 @@ bool GraphicsSystem::SetOcclusionQueryResolver(system::OcclusionQueryResolver re
   return true;
 }
 
+bool GraphicsSystem::SetSignalGate(system::GpuSignalGate gate, void* user) {
+  if (!command_processor_) {
+    return false;
+  }
+  command_processor_->SetSignalGate(gate, user);
+  REXGPU_INFO("Signal gate {}", gate ? "set" : "removed");
+  return true;
+}
+
 bool GraphicsSystem::GetGammaRamp(system::GammaRamp& ramp) {
   if (!command_processor_) {
     return false;
