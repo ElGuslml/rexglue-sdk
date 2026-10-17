@@ -204,7 +204,12 @@ void BuilderContext::emit_function_call(uint32_t address) {
       // frame. A share_registers function still has to elide them.
       if (cfg.nonVolatileRegistersAsLocalVariables &&
           (name.find("__rest") == 0 || name.find("__save") == 0)) {
-        // print nothing - these are handled by local variable tracking
+        // Nothing else to save or restore: the registers are local variables. __savegprlr_N's last
+        // store still matters: it puts the return address (r12, from mflr) in the frame's LR slot,
+        // where the guest's stack walks read it (a caller's caller, a crash handler).
+        if (name.find("__savegprlr_") == 0) {
+          println("	REX_STORE_U32({}.u32 + -8, {}.u32);", r(1), r(12));
+        }
         return;
       }
 
