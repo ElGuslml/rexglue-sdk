@@ -1032,6 +1032,9 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
   return true;
 }
 
+// How often WAIT_REG_MEM reads the value again while it waits, in microseconds (with vsync on).
+constexpr int64_t kWaitRegMemPollInterval = 100;
+
 bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reader, uint32_t packet,
                                                        uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
@@ -1094,7 +1097,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
           // User wants it fast and dangerous.
           rex::thread::MaybeYield();
         } else {
-          rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
+          // The wait field is the GPU's poll interval in its own clocks: the console notices the
+          // value within microseconds. Sleeping wait / 0x100 ms (1 ms, and Windows rounds it up)
+          // made every wait for a value the CPU writes a few hundred microseconds later last a
+          // millisecond or two more, and the game's threads wait for the ring behind it.
+          rex::thread::PreciseSleep(std::chrono::microseconds(kWaitRegMemPollInterval));
         }
         rex::thread::SyncMemory();
         ReturnFromWait();
