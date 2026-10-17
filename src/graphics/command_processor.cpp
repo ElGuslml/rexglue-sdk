@@ -259,6 +259,7 @@ void CommandProcessor::WorkerThreadMain() {
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.
     if (read_ptr_writeback_ptr_) {
+      PassSignalGate();
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
                                        read_ptr_index_);
     }
@@ -385,6 +386,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
     if ((1 << scratch_reg) & regs.values[XE_GPU_REG_SCRATCH_UMSK]) {
       // Enabled - write to address.
+      PassSignalGate();
       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
@@ -818,9 +820,11 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       result = ExecutePacketType3_NOP(reader, packet, count);
       break;
     case PM4_INTERRUPT:
+      PassSignalGate();
       result = ExecutePacketType3_INTERRUPT(reader, packet, count);
       break;
     case PM4_XE_SWAP:
+      PassSignalGate();
       result = ExecutePacketType3_XE_SWAP(reader, packet, count);
       break;
     case PM4_INDIRECT_BUFFER:
@@ -834,24 +838,30 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       result = ExecutePacketType3_REG_RMW(reader, packet, count);
       break;
     case PM4_REG_TO_MEM:
+      PassSignalGate();
       result = ExecutePacketType3_REG_TO_MEM(reader, packet, count);
       break;
     case PM4_MEM_WRITE:
+      PassSignalGate();
       result = ExecutePacketType3_MEM_WRITE(reader, packet, count);
       break;
     case PM4_COND_WRITE:
+      PassSignalGate();
       result = ExecutePacketType3_COND_WRITE(reader, packet, count);
       break;
     case PM4_EVENT_WRITE:
       result = ExecutePacketType3_EVENT_WRITE(reader, packet, count);
       break;
     case PM4_EVENT_WRITE_SHD:
+      PassSignalGate();
       result = ExecutePacketType3_EVENT_WRITE_SHD(reader, packet, count);
       break;
     case PM4_EVENT_WRITE_EXT:
+      PassSignalGate();
       result = ExecutePacketType3_EVENT_WRITE_EXT(reader, packet, count);
       break;
     case PM4_EVENT_WRITE_ZPD:
+      PassSignalGate();
       result = ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
       break;
     case PM4_DRAW_INDX:
