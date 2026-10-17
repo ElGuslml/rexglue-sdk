@@ -163,8 +163,28 @@ function(rexglue_configure_target target_name)
                 $<TARGET_FILE_DIR:${target_name}>
             VERBATIM
         )
+        list(APPEND _rexglue_staged_plugins $<TARGET_FILE:${_plugin_target}>)
         unset(_plugin_target)
     endforeach()
+
+    if(WIN32)
+        # The POST_BUILD copies run only when the host links again. A change to the SDK alone
+        # builds new DLLs without that: the GPU plugins are not linked at all, and rexruntime's
+        # import library does not change while its exports don't. The host then ran with the
+        # old DLLs. Stage them on every build as well (copy_if_different, cheap when up to date).
+        set(_rexglue_plugin_copy "")
+        if(_rexglue_staged_plugins)
+            set(_rexglue_plugin_copy COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_rexglue_staged_plugins} $<TARGET_FILE_DIR:${target_name}>)
+        endif()
+        add_custom_target(${target_name}_stage_dlls ALL
+            COMMAND "$<$<BOOL:$<TARGET_RUNTIME_DLLS:${target_name}>>:${CMAKE_COMMAND};-E;copy_if_different;$<TARGET_RUNTIME_DLLS:${target_name}>;$<TARGET_FILE_DIR:${target_name}>>"
+            ${_rexglue_plugin_copy}
+            COMMAND_EXPAND_LISTS
+            VERBATIM
+        )
+        add_dependencies(${target_name}_stage_dlls ${target_name})
+    endif()
 
     if(APPLE AND REXGLUE_USE_VULKAN)
         _rexglue_stage_macos_vulkan_runtime(${target_name})
