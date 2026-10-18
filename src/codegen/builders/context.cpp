@@ -172,6 +172,58 @@ const CallTarget* BuilderContext::findCallTarget(uint32_t site) const {
   return nullptr;
 }
 
+// The XDK's register save/restore helpers, done on ctx: __savegprlr_N / __restgprlr_N store /
+// load rN-r31 at r1 - 8 * (33 - i) and the return address (r12) at r1 - 8, which __restgprlr_N
+// also moves to LR; __savefpr_N / __restfpr_N store / load fN-f31 at r12 - 8 * (32 - i);
+// __savevmx_N / __restvmx_N store / load vN-v31 (or vN-v127) at r12 - 16 * (last + 1 - i), and
+// leave r11 at -16.
+void BuilderContext::emit_shared_register_helper(std::string_view name) {
+  // The save and restore helpers' prefixes have the same length.
+  auto first = [&](std::string_view prefix) {
+    return std::stoi(std::string(name.substr(prefix.size())));
+  };
+  bool save = name.starts_with("__save");
+  if (name.find("gprlr_") != std::string_view::npos) {
+    for (int i = first("__savegprlr_"); i < 32; ++i) {
+      if (save)
+        println("\tREX_STORE_U64({}.u32 + -{}, {}.u64);", r(1), 8 * (33 - i), r(i));
+      else
+        println("\t{}.u64 = REX_LOAD_U64({}.u32 + -{});", r(i), r(1), 8 * (33 - i));
+    }
+    if (save) {
+      println("\tREX_STORE_U32({}.u32 + -8, {}.u32);", r(1), r(12));
+    } else {
+      println("\t{}.u64 = REX_LOAD_U32({}.u32 + -8);", r(12), r(1));
+      println("\tctx.lr = {}.u64;", r(12));
+    }
+  } else if (name.find("fpr_") != std::string_view::npos) {
+    for (int i = first("__savefpr_"); i < 32; ++i) {
+      if (save)
+        println("\tREX_STORE_U64({}.u32 + -{}, {}.u64);", r(12), 8 * (32 - i), f(i));
+      else
+        println("\t{}.u64 = REX_LOAD_U64({}.u32 + -{});", f(i), r(12), 8 * (32 - i));
+    }
+  } else if (name.find("vmx_") != std::string_view::npos) {
+    constexpr const char* kMask = "simde_mm_load_si128((simde__m128i*)VectorMaskL)";
+    int from = first("__savevmx_");
+    int last = from >= 64 ? 127 : 31;
+    for (int i = from; i <= last; ++i) {
+      println("\t{} = ({}.u32 + -{}) & ~0xF;", ea(), r(12), 16 * (last + 1 - i));
+      if (save)
+        println(
+            "\tsimde_mm_store_si128((simde__m128i*)REX_RAW_ADDR({}), simde_mm_shuffle_epi8("
+            "simde_mm_load_si128((simde__m128i*){}.u8), {}));",
+            ea(), v(i), kMask);
+      else
+        println(
+            "\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8("
+            "simde_mm_load_si128((simde__m128i*)REX_RAW_ADDR({})), {}));",
+            v(i), ea(), kMask);
+    }
+    println("\t{}.s64 = -16;", r(11));
+  }
+}
+
 void BuilderContext::emit_function_call(uint32_t address) {
   const auto& cfg = config();
 
@@ -201,9 +253,15 @@ void BuilderContext::emit_function_call(uint32_t address) {
       // Handle save/restore helpers. Gated on the global setting, not this
       // function's: the helper bodies are emitted under it too, so once they
       // spill to locals they are no-ops that scribble zeros on the caller's
-      // frame. A share_registers function still has to elide them.
+      // frame. A share_registers function cannot call them either, but its
+      // registers are in ctx, which its caller takes back after the call (see
+      // below): it gets the helpers' work done on ctx in place.
       if (cfg.nonVolatileRegistersAsLocalVariables &&
           (name.find("__rest") == 0 || name.find("__save") == 0)) {
+        if (fn.sharesRegisters()) {
+          emit_shared_register_helper(name);
+          return;
+        }
         // Nothing else to save or restore: the registers are local variables. __savegprlr_N's last
         // store still matters: it puts the return address (r12, from mflr) in the frame's LR slot,
         // where the guest's stack walks read it (a caller's caller, a crash handler).
@@ -216,8 +274,15 @@ void BuilderContext::emit_function_call(uint32_t address) {
       // An SEH funclet runs on its owner's frame and reads whatever non-volatiles
       // the owner left live, so hand it the localized copies through ctx and take
       // them back afterwards. Only registers already localized here can be live at
-      // this point, so that set is the whole live-in the funclet can see.
+      // this point, so that set is the whole live-in the funclet can see. What ctx
+      // held belongs to a share_registers function further up the stack, which the
+      // guest code here would have saved and restored: it is put back afterwards.
       if (targetFn->sharesRegisters() && localizeNonVolatiles()) {
+        println("\t{{");
+        for (size_t i = 14; i < 32; ++i) {
+          if (locals.r[i])
+            println("\tPPCRegister shared_r{} = ctx.r{};", i, i);
+        }
         for (size_t i = 14; i < 32; ++i) {
           if (locals.r[i])
             println("\tctx.r{} = r{};", i, i);
@@ -228,6 +293,11 @@ void BuilderContext::emit_function_call(uint32_t address) {
           if (locals.r[i])
             println("\tr{} = ctx.r{};", i, i);
         }
+        for (size_t i = 14; i < 32; ++i) {
+          if (locals.r[i])
+            println("\tctx.r{} = shared_r{};", i, i);
+        }
+        println("\t}}");
         return;
       }
 
