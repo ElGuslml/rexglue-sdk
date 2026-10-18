@@ -232,6 +232,12 @@ struct BuilderContext {
   void emit_function_call(uint32_t address);
 
   /**
+   * @brief Emit what a register save/restore helper (__savegprlr_N, __restfpr_N, __savevmx_N...)
+   * does, on ctx, in a share_registers function, where the helpers are not called.
+   */
+  void emit_shared_register_helper(std::string_view name);
+
+  /**
    * @brief Emit C++ code for a conditional branch.
    * @param not_ If true, invert the condition
    * @param cond Condition field name ("eq", "lt", "gt")
