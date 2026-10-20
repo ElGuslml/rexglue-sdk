@@ -518,6 +518,10 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   for (uint32_t i = offset; i < 64; i++) {
     dwords[i] = xenos::MakePacketType2();
   }
+
+  if (auto* graphics_system = REX_KERNEL_STATE()->emulator()->graphics_system()) {
+    graphics_system->NoteSwapIssued();
+  }
 }
 
 void RegisterVideoExports(rex::runtime::ExportResolver* export_resolver,

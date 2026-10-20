@@ -79,6 +79,9 @@ class GraphicsSystem : public system::IGraphicsSystem {
   bool SetHostRendering(bool enabled) override;
   bool SetOcclusionQueryResolver(system::OcclusionQueryResolver resolver, void* user) override;
   bool SetSignalGate(system::GpuSignalGate gate, void* user) override;
+  void NoteSwapIssued() override { swaps_issued_.fetch_add(1, std::memory_order_acq_rel); }
+  bool GetSwapCounts(uint64_t& issued, uint64_t& executed) override;
+  bool SetSwapObserver(system::GpuSwapObserver observer, void* user) override;
   bool GetGammaRamp(system::GammaRamp& ramp) override;
   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);
 
@@ -135,6 +138,8 @@ class GraphicsSystem : public system::IGraphicsSystem {
   std::unique_ptr<::rex::ui::Presenter> presenter_;
 
   std::atomic_flag host_gpu_loss_reported_;
+  // The guest's swaps issued by VdSwap (NoteSwapIssued).
+  std::atomic<uint64_t> swaps_issued_{0};
 };
 
 }  // namespace rex::graphics

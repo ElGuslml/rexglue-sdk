@@ -61,6 +61,10 @@ using OcclusionQueryResolver = bool (*)(void* user, uint32_t sample_count_addres
 // Passed by the command processor before it signals the guest (see IGraphicsSystem::SetSignalGate).
 using GpuSignalGate = void (*)(void* user);
 
+// Called by the command processor after it executed one of the guest's swaps, with the number executed so far
+// (see IGraphicsSystem::SetSwapObserver).
+using GpuSwapObserver = void (*)(void* user, uint64_t swaps_executed);
+
 // The guest's display gamma ramp, as the GPU's display controller holds it (the DC_LUT registers) and the
 // command processor tracks it (see IGraphicsSystem::GetGammaRamp).
 struct GammaRamp {
@@ -152,6 +156,28 @@ class IGraphicsSystem {
   // if the system has no command processor.
   virtual bool SetSignalGate(GpuSignalGate gate, void* user) {
     (void)gate;
+    (void)user;
+    return false;
+  }
+
+  // The guest's swaps: VdSwap writes one into the ring buffer for every frame the guest presents, and the
+  // command processor executes it in its turn, after what the guest submitted before it and at the pace the
+  // guest's frames are shown (the guest's own waits for the vertical blank come first in the ring buffer). A
+  // renderer that presents the guest's frames itself, when the guest calls its present function, can show
+  // each one when its swap executes instead, as the host presenters do: the guest's CPU runs ahead of the
+  // command processor, and its delays then do not reach the screen.
+  // NoteSwapIssued: called by VdSwap after it wrote a swap into the ring buffer.
+  virtual void NoteSwapIssued() {}
+  // The swaps issued (VdSwap calls) and executed so far. Safe from any thread. Returns false if the system has
+  // no command processor.
+  virtual bool GetSwapCounts(uint64_t& issued, uint64_t& executed) {
+    issued = executed = 0;
+    return false;
+  }
+  // Called on the GPU thread after every swap the command processor executes. nullptr turns it off. Returns
+  // false if the system has no command processor.
+  virtual bool SetSwapObserver(GpuSwapObserver observer, void* user) {
+    (void)observer;
     (void)user;
     return false;
   }
