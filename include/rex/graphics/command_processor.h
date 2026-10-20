@@ -101,6 +101,12 @@ class CommandProcessor {
     signal_gate_user_ = user;
     signal_gate_.store(gate, std::memory_order_release);
   }
+  // See system::IGraphicsSystem::SetSwapObserver and GetSwapCounts.
+  void SetSwapObserver(system::GpuSwapObserver observer, void* user) {
+    swap_observer_user_ = user;
+    swap_observer_.store(observer, std::memory_order_release);
+  }
+  uint64_t swaps_executed() const { return swaps_executed_.load(std::memory_order_acquire); }
 
   // See system::IGraphicsSystem::SetOcclusionQueryResolver.
   void SetOcclusionQueryResolver(system::OcclusionQueryResolver resolver, void* user) {
@@ -300,6 +306,10 @@ class CommandProcessor {
   }
   std::atomic<system::GpuSignalGate> signal_gate_{nullptr};
   void* signal_gate_user_ = nullptr;
+  // The guest's swaps executed (PM4_XE_SWAP), and who is told of each (SetSwapObserver).
+  std::atomic<uint64_t> swaps_executed_{0};
+  std::atomic<system::GpuSwapObserver> swap_observer_{nullptr};
+  void* swap_observer_user_ = nullptr;
 
   // Answers occlusion queries the command processor has no host query for (SetOcclusionQueryResolver).
   std::atomic<system::OcclusionQueryResolver> occlusion_query_resolver_{nullptr};

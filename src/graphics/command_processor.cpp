@@ -1026,6 +1026,10 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+  uint64_t swaps_executed = swaps_executed_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  if (auto observer = swap_observer_.load(std::memory_order_acquire)) {
+    observer(swap_observer_user_, swaps_executed);
+  }
 
   // gpu_guest_fps_limit: hold the command processor after a guest
   // frame so the next one isn't swapped before 1/limit s has passed. The game's

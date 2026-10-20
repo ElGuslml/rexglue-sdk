@@ -330,6 +330,21 @@ bool GraphicsSystem::SetSignalGate(system::GpuSignalGate gate, void* user) {
   return true;
 }
 
+bool GraphicsSystem::GetSwapCounts(uint64_t& issued, uint64_t& executed) {
+  issued = swaps_issued_.load(std::memory_order_acquire);
+  executed = command_processor_ ? command_processor_->swaps_executed() : 0;
+  return command_processor_ != nullptr;
+}
+
+bool GraphicsSystem::SetSwapObserver(system::GpuSwapObserver observer, void* user) {
+  if (!command_processor_) {
+    return false;
+  }
+  command_processor_->SetSwapObserver(observer, user);
+  REXGPU_INFO("Swap observer {}", observer ? "set" : "removed");
+  return true;
+}
+
 bool GraphicsSystem::GetGammaRamp(system::GammaRamp& ramp) {
   if (!command_processor_) {
     return false;
