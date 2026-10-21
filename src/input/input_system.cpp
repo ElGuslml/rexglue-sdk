@@ -290,6 +290,24 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
     out_state->gamepad.buttons = static_cast<uint16_t>(buttons & ~consumed_buttons_[user_index]);
   }
 
+  // A host UI watching the guest's reads (SetHostInputFilter) can take this one: the guest reads the pad at rest,
+  // and the buttons held stay masked until released.
+  if (result == X_ERROR_SUCCESS && out_state) {
+    bool take = false;
+    {
+      std::lock_guard lock(host_filter_mutex_);
+      if (host_filter_) {
+        take = host_filter_(user_index, out_state->gamepad);
+      }
+    }
+    if (take) {
+      if (user_index < kMaxGuestUsers) {
+        consumed_buttons_[user_index] |= static_cast<uint16_t>(out_state->gamepad.buttons);
+      }
+      std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
+    }
+  }
+
   return result;
 }
 
@@ -353,6 +371,11 @@ void InputSystem::RemoveUIInputBlocker() {
   }
 
   ui_input_blockers_.fetch_sub(1);
+}
+
+void InputSystem::SetHostInputFilter(HostInputFilter filter) {
+  std::lock_guard lock(host_filter_mutex_);
+  host_filter_ = std::move(filter);
 }
 
 bool InputSystem::GetVibrationEnabled() const {
@@ -462,6 +485,11 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                    X_INPUT_KEYSTROKE* out_keystroke) {
   SCOPE_profile_cpu_f("hid");
+  // A dialog owns the controller (AddUIInputBlocker): no keystrokes for the guest either, as GetState gives it a
+  // pad at rest.
+  if (ui_input_blockers_.load() > 0) {
+    return X_ERROR_EMPTY;
+  }
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }

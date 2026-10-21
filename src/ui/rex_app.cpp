@@ -26,6 +26,7 @@
 #include <rex/ui/overlay/achievements_overlay.h>
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
+#include <rex/ui/overlay/quit_prompt.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/audio/audio_system.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
@@ -261,6 +262,33 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
         return true;
       return !imgui_drawer_->GetIO().WantCaptureMouse;
     });
+    // The quit prompt (rex/ui/overlay/quit_prompt.h): a game offers it on its title screen, and accepting closes
+    // the window as its close button does. Its filter takes the press of B that opens it; while it is open it
+    // holds an input blocker and reads the controller for the UI.
+    if (imgui_drawer_) {
+      rex::ui::QuitPromptInput quit_input;
+      quit_input.block = [input_sys](bool block) {
+        if (block) {
+          input_sys->AddUIInputBlocker();
+        } else {
+          input_sys->RemoveUIInputBlocker();
+        }
+      };
+      quit_input.read = [input_sys](uint32_t user_index, rex::input::X_INPUT_GAMEPAD& gamepad) {
+        rex::input::X_INPUT_STATE state = {};
+        if (input_sys->GetStateForUI(user_index, &state) != X_ERROR_SUCCESS) {
+          return false;
+        }
+        gamepad = state.gamepad;
+        return true;
+      };
+      rex::ui::SetupQuitPrompt(imgui_drawer_.get(), &app_context(), std::move(quit_input), [this] {
+        if (window_) {
+          window_->RequestClose();
+        }
+      });
+      input_sys->SetHostInputFilter(&rex::ui::QuitPromptInputFilter);
+    }
   }
 
   std::string xex_image = "game:\\default.xex";

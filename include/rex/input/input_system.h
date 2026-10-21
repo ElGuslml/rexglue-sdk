@@ -13,7 +13,9 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -59,6 +61,14 @@ class InputSystem : public system::IInputSystem {
   void AddUIInputBlocker();
   void RemoveUIInputBlocker();
 
+  /// A host UI that watches the guest's reads, such as the quit prompt (rex/ui/overlay/quit_prompt.h): `filter`
+  /// sees each user's pad whenever the guest reads it (GetState, not while a blocker is held) and returns true to
+  /// take that read: the guest gets the pad at rest, and the buttons held stay masked until released, as after a
+  /// dialog. A UI that then owns the controller holds a blocker (AddUIInputBlocker) and reads with GetStateForUI.
+  /// One filter at a time; an empty function removes it. Called on the guest's threads.
+  using HostInputFilter = std::function<bool(uint32_t user_index, const X_INPUT_GAMEPAD& gamepad)>;
+  void SetHostInputFilter(HostInputFilter filter);
+
   bool GetVibrationEnabled() const;
   void ToggleVibration();
 
@@ -101,6 +111,9 @@ class InputSystem : public system::IInputSystem {
   std::atomic<int> ui_input_blockers_{0};
   // Masked out per user until the guest sees them released.
   std::array<uint16_t, kMaxGuestUsers> consumed_buttons_ = {};
+
+  std::mutex host_filter_mutex_;
+  HostInputFilter host_filter_;
 };
 
 /// Create a default InputSystem with SDL + MnK + NOP drivers.
