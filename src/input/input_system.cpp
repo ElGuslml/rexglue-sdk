@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include <rex/dbg.h>
 #include <rex/input/device_assignment.h>
@@ -245,6 +246,21 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   if (!any) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
+  // A host UI that has the controller (SetHostInputFilter): the guest reads the pad at rest. The packet
+  // number still follows the real state, so the guest sees the change when the pad comes back.
+  bool hide = false;
+  {
+    std::lock_guard lock(host_filter_mutex_);
+    if (host_filter_) {
+      hide = host_filter_(user_index, merged.gamepad);
+    }
+  }
+  if (user_index < host_filter_hiding_.size()) {
+    host_filter_hiding_[user_index].store(hide, std::memory_order_relaxed);
+  }
+  if (hide) {
+    std::memset(&merged.gamepad, 0, sizeof(merged.gamepad));
+  }
   if (out_state) {
     *out_state = merged;
   }
@@ -298,6 +314,12 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
+  // The host UI has the controller (SetHostInputFilter): nothing for the guest. The drivers keep their state, so
+  // a button held across it gives its release (not its press) once the filter lets the pad through.
+  if (user_index < host_filter_hiding_.size() &&
+      host_filter_hiding_[user_index].load(std::memory_order_relaxed)) {
+    return X_ERROR_EMPTY;
+  }
 
   RefreshDevices();
   std::vector<DeviceId> ids;
@@ -319,6 +341,16 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
     }
   }
   return any_connected ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+}
+
+void InputSystem::SetHostInputFilter(HostInputFilter filter) {
+  std::lock_guard lock(host_filter_mutex_);
+  host_filter_ = std::move(filter);
+  if (!host_filter_) {
+    for (auto& hiding : host_filter_hiding_) {
+      hiding.store(false, std::memory_order_relaxed);
+    }
+  }
 }
 
 std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {

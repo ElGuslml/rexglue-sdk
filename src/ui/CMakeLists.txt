@@ -28,6 +28,7 @@ set(REXUI_OVERLAY_SOURCES
     overlay/debug_overlay.cpp
     overlay/console_overlay.cpp
     overlay/console_commands.cpp
+    overlay/quit_prompt.cpp
     overlay/settings_overlay.cpp
 )
 

@@ -60,6 +60,14 @@ decisions (`native_x_renderer/docs/decisions.md`).
 | 32 | `SharedMemory::RequestRanges` keeps its merged ranges between calls (D84) |
 | 33 | The guest's swaps are counted, and a renderer is told when one executes (D86) |
 
+## For the games
+
+Features a game turns on from its own code (a `[[midasm_hook]]` that calls them). They do nothing until it does.
+
+| # | Change |
+|---|---|
+| 34 | A quit prompt the game offers on its title screen (`rex/ui/overlay/quit_prompt.h`): B asks whether to quit, in the game's language, A quits and B cancels, and the game does not see those presses (`InputSystem::SetHostInputFilter`); `quit_prompt` turns it off |
+
 ## Working on this branch
 
 - **A change**: commit it on `recomp` with a message that explains it (author

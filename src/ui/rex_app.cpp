@@ -24,6 +24,7 @@
 #include <rex/ui/overlay/achievements_overlay.h>
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
+#include <rex/ui/overlay/quit_prompt.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/audio/audio_system.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
@@ -262,6 +263,15 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
           return true;
         return !imgui_drawer_->GetIO().WantCaptureMouse;
       });
+      // The quit prompt (rex/ui/overlay/quit_prompt.h): a game offers it on its title screen, and accepting
+      // closes the window as its close button does. Its filter hides the controller from the game while the
+      // dialog is open.
+      rex::ui::SetupQuitPrompt(imgui_drawer_.get(), &app_context(), [this] {
+        if (window_) {
+          window_->RequestClose();
+        }
+      });
+      input_sys->SetHostInputFilter(&rex::ui::QuitPromptInputFilter);
     }
   }
 
