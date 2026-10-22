@@ -18,10 +18,14 @@ class ImGuiDrawer;
 class WindowedAppContext;
 
 // Console games have no way out of themselves: on PC, B on the title screen ("PRESS START") is the natural
-// one. The game side calls OfferQuitPrompt() on every frame it shows a screen the player can quit from (a
-// [[midasm_hook]] in the code that runs that screen). A press of B that begins while it is offered opens a
-// dialog, "Are you sure you want to quit the game?" in the game's language (user_language), which A or Enter
-// accepts (the window closes, as with its close button) and B or Escape cancels; the mouse works too.
+// one. The game side says when it shows a screen the player can quit from, in one of two ways:
+// - OfferQuitPrompt() on every frame of that screen (a [[midasm_hook]] in the code that runs it; KameoRecomp);
+// - SetQuitPromptCondition() once, with a test of the game's state (what its hooks recorded, or guest memory)
+//   that the filter runs when a press of B begins: for a game whose screens change on events rather than in code
+//   that runs every frame (POTCAWERecomp, its menus).
+// A press of B that begins while it is offered opens a dialog, "Are you sure you want to quit the game?" in the
+// game's language (user_language), which A or Enter accepts (the window closes, as with its close button) and B
+// or Escape cancels; the mouse works too.
 //
 // The game never sees those presses. The press of B that opens the dialog is taken from the guest's read
 // (QuitPromptInputFilter, installed with InputSystem::SetHostInputFilter); while the dialog is open it holds an
@@ -29,7 +33,7 @@ class WindowedAppContext;
 // (InputSystem::GetStateForUI) on every frame it is drawn. The buttons held when it closes stay masked until
 // released, so the press that closed it does not reach the game either.
 //
-// --quit_prompt=false turns it off: OfferQuitPrompt() does nothing then.
+// --quit_prompt=false turns it off: the dialog never opens then.
 
 // How the dialog reaches the controller: ReXApp passes the InputSystem's blocker and its read for the UI (rexui
 // cannot use the InputSystem itself, since rexinput links rexui).
@@ -47,6 +51,15 @@ void SetupQuitPrompt(ImGuiDrawer* imgui_drawer, WindowedAppContext* app_context,
 
 // The game shows a screen the player can quit from in this frame. Any thread; cheap.
 void OfferQuitPrompt();
+
+// The game shows a screen the player can quit from whenever `condition` returns true. It runs on the guest's
+// thread that reads the controller, when a press of B begins (not every frame), so it can read the game's state;
+// it must not call back into this API. An empty function removes it. Works together with OfferQuitPrompt().
+void SetQuitPromptCondition(std::function<bool()> condition);
+
+// The dialog's language (an XLanguage, as user_language): for a game that asks for its language in its own menu
+// instead of following user_language (POTCAWERecomp passes the Windows display language). 0 = user_language.
+void SetQuitPromptLanguage(uint32_t xlanguage);
 
 // Whether the dialog is open.
 bool IsQuitPromptOpen();
