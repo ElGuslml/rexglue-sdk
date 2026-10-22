@@ -1,7 +1,8 @@
 # The `recomp` branch
 
-This branch is the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) at **v0.10.0** (`c94f5eb`) with the
-changes that Gustavo Garcia's recompilation projects need, one commit each. The games use it as their
+This branch is the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) at its **nightly of 2026-10-02**
+(`nightly-20261002-bd833a2a`, the `development` branch at `bd833a2`: v0.10.0 and 24 commits) with the changes that
+Gustavo Garcia's recompilation projects need, one commit each. The games use it as their
 `thirdparty/rexglue-sdk` submodule, pinned to a commit of this branch:
 
 - KameoRecomp (Kameo: Elements of Power)
@@ -15,6 +16,16 @@ Until 2026-10-21 these changes were `git format-patch` series that every game ap
 ones in each game's `patches/` and 8 in NativeXRenderer's `sdk_patches/`. They are the commits of this branch now,
 in the same order, with the same messages. Each commit message explains its change.
 
+On 2026-10-21 the branch moved from v0.10.0 (`c94f5eb`; its last commit there is tagged `recomp-v0.10.0`) to the
+nightly. Of the upstream commits, those that touch these changes:
+- the window code: fullscreen is borderless at the desktop mode, and `fullscreen_exclusive` switches the display
+  mode instead. Change 5 is gone: a game sets `fullscreen_exclusive = !borderless`;
+- the input code: dead zones, vibration, UI input blockers with a read for the UI (`GetStateForUI`), the buttons
+  held when a dialog closes masked until released. Change 34 is built on them;
+- the code generator (`stwcx.` as `std::atomic` compare-and-swap, fences for `sync`/`lwsync`/`eieio`, unsigned
+  register types): every game regenerates its code;
+- the log: no size rotation (no `name.1.log` files), a directory budget instead.
+
 ## General fixes and options
 
 None of them is specific to one game; the options they add are off by default.
@@ -25,7 +36,7 @@ None of them is specific to one game; the options they add are off by default.
 | 2 | Invalidate GPU copies of newly allocated physical memory |
 | 3 | Code generator: `vpkd3d128` lost the sign when the destination aliases the source |
 | 4 | `gpu_depth_clamp`: clamp depth instead of clipping in Z, like Xenos (D3D12 and Vulkan) |
-| 5 | `fullscreen_borderless_window` option |
+| 5 | Removed on the nightly: `fullscreen_borderless_window` (upstream's fullscreen is borderless; `fullscreen_exclusive` switches the mode) |
 | 6 | `gpu_backend` option to choose D3D12 or Vulkan |
 | 7 | `XGetLanguage` honors `user_language` |
 | 8 | No busy waiting when there is no work (timer queue, presenter repaints) |
@@ -66,7 +77,7 @@ Features a game turns on from its own code (a `[[midasm_hook]]` that calls them)
 
 | # | Change |
 |---|---|
-| 34 | A quit prompt the game offers on its title screen (`rex/ui/overlay/quit_prompt.h`): B asks whether to quit, in the game's language, A quits and B cancels, and the game does not see those presses (`InputSystem::SetHostInputFilter`); `quit_prompt` turns it off |
+| 34 | A quit prompt the game offers on its title screen (`rex/ui/overlay/quit_prompt.h`): B asks whether to quit, in the game's language, A quits and B cancels, and the game does not see those presses (`InputSystem::SetHostInputFilter`, upstream's UI input blockers); `quit_prompt` turns it off |
 | 35 | The quit prompt can also be offered with a condition the game registers once, asked when a press of B begins (`SetQuitPromptCondition`), for a game whose screens change on events rather than in code that runs every frame; and its language set by the game (`SetQuitPromptLanguage`), for a game that asks for its language in its own menu |
 
 ## Working on this branch
@@ -75,6 +86,8 @@ Features a game turns on from its own code (a `[[midasm_hook]]` that calls them)
   `Gustavo Garcia <44309076+ElGuslml@users.noreply.github.com>`), add it to the tables above, push, then move each
   game's `thirdparty/rexglue-sdk` submodule to the new commit and test it there.
 - **Debug instrumentation** never goes on this branch: keep it on a local branch on top of it.
-- **A new upstream release**: rebase `recomp` onto the new tag and resolve the conflicts once, for every game.
+- **A new upstream release or nightly**: tag the branch's last commit (as `recomp-v0.10.0`), so that the games'
+  older commits keep their submodule, rebase `recomp` onto the new upstream commit and resolve the conflicts once,
+  for every game, then force-push it.
 - **Patch files** for someone who wants them on another checkout of the SDK:
-  `git format-patch c94f5eb..recomp`.
+  `git format-patch bd833a2..recomp`.
