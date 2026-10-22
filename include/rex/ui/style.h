@@ -74,12 +74,31 @@ struct SettingsStyle {
   ImVec4 lifecycle_unknown{1.00f, 1.00f, 1.00f, 1.00f};
 };
 
+/// The recomp branch's dialogs (the achievement toast and list, the quit prompt; RECOMP.md): a dark card with an
+/// accent color, in Barlow (ImGuiDrawer::Font). Colors at full opacity: the dialogs fade them.
+struct DialogStyle {
+  ImVec4 background{0.082f, 0.102f, 0.129f, 0.97f};  // #151A21
+  ImVec4 raised{0.125f, 0.149f, 0.184f, 1.00f};      // #20262F: icon wells, the progress track, buttons
+  ImVec4 hover{0.180f, 0.212f, 0.259f, 1.00f};       // #2E3642: a button under the mouse
+  ImVec4 border{1.00f, 1.00f, 1.00f, 0.08f};
+  ImVec4 text{0.914f, 0.925f, 0.945f, 1.00f};        // #E9ECF1
+  ImVec4 muted{0.639f, 0.675f, 0.725f, 1.00f};       // #A3ACB9
+  ImVec4 dim{0.486f, 0.525f, 0.584f, 1.00f};         // #7C8695
+  ImVec4 accent{0.878f, 0.663f, 0.231f, 1.00f};      // #E0A93B
+  ImVec4 on_accent{0.090f, 0.071f, 0.039f, 1.00f};   // #17120A
+  ImVec4 success{0.357f, 0.769f, 0.537f, 1.00f};     // #5BC489
+  ImVec4 shadow{0.00f, 0.00f, 0.00f, 0.35f};
+  ImVec4 dim_background{0.00f, 0.00f, 0.00f, 0.59f};  // behind a modal dialog
+  float rounding = 12.0f;  // in pixels of a 720-line screen
+};
+
 struct Style {
   AchievementsStyle achievements;
   ToastStyle toast;
   ConsoleStyle console;
   DebugOverlayStyle debug;
   SettingsStyle settings;
+  DialogStyle dialog;
 };
 
 }  // namespace rex::ui

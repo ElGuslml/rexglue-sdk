@@ -15,3 +15,4 @@
 *.obj binary
 *.o binary
 *.pdb binary
+*.ttf binary

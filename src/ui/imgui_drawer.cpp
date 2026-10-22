@@ -10,8 +10,10 @@
  */
 
 #include <cfloat>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 
 #include <rex/assert.h>
@@ -23,6 +25,8 @@
 #include <rex/ui/window.h>
 
 #include <imgui.h>
+
+#include "ui/ui_fonts.h"
 
 namespace rex {
 namespace ui {
@@ -168,6 +172,11 @@ void ImGuiDrawer::Initialize() {
   // Windows.
   io.IniFilename = nullptr;
 
+  // The textures are made on request (UpdateTextures), so fonts are rasterized at any size they are drawn at.
+  io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+  io.BackendRendererName = "rex::ui::ImmediateDrawer";
+  io.Fonts->TexDesiredFormat = ImTextureFormat_RGBA32;
+
   // Setup the font glyphs.
   ImFontConfig font_config;
   font_config.OversampleH = font_config.OversampleV = 1;
@@ -196,6 +205,7 @@ void ImGuiDrawer::Initialize() {
     REXLOG_WARN("Unable to load Japanese font; JP characters will be boxes");
   }
 #endif
+  AddDialogFonts();
 
   if (font_setup_) {
     font_setup_(io.Fonts);
@@ -328,17 +338,92 @@ std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
   }
 }
 
-void ImGuiDrawer::SetupFontTexture() {
-  if (font_texture_ || !immediate_drawer_) {
+void ImGuiDrawer::AddDialogFonts() {
+  ImGuiIO& io = ImGui::GetIO();
+#if REX_PLATFORM_WIN32
+  // MS Gothic for Japanese, read once and shared by the three fonts (the default font loads its own copy).
+  {
+    std::ifstream file("C:\\Windows\\Fonts\\msgothic.ttc", std::ios::binary | std::ios::ate);
+    std::streamsize length = file ? std::streamsize(file.tellg()) : 0;
+    if (length > 0) {
+      japanese_font_.resize(size_t(length));
+      file.seekg(0);
+      if (!file.read(reinterpret_cast<char*>(japanese_font_.data()), length)) {
+        japanese_font_.clear();
+      }
+    }
+  }
+#endif
+  struct Source {
+    const unsigned char* data;
+    size_t size;
+    const char* name;
+  };
+  const Source sources[size_t(Font::kCount)] = {
+      {fonts::kBarlowRegular, fonts::kBarlowRegularSize, "Barlow Regular"},
+      {fonts::kBarlowSemiBold, fonts::kBarlowSemiBoldSize, "Barlow SemiBold"},
+      {fonts::kBarlowCondensedBold, fonts::kBarlowCondensedBoldSize, "Barlow Condensed Bold"},
+  };
+  for (size_t i = 0; i < size_t(Font::kCount); ++i) {
+    ImFontConfig config;
+    config.FontDataOwnedByAtlas = false;  // the embedded data
+    std::snprintf(config.Name, sizeof(config.Name), "%s", sources[i].name);
+    fonts_[i] = io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(sources[i].data),
+                                               int(sources[i].size), 16.0f, &config);
+    if (fonts_[i] && !japanese_font_.empty()) {
+      // Glyphs Barlow lacks (Japanese, and the kanji Chinese shares) come from MS Gothic.
+      ImFontConfig merge;
+      merge.MergeMode = true;
+      merge.FontDataOwnedByAtlas = false;
+      io.Fonts->AddFontFromMemoryTTF(japanese_font_.data(), int(japanese_font_.size()), 16.0f, &merge);
+    }
+  }
+}
+
+float ImGuiDrawer::dpi_scale() const {
+  return float(window_->GetDpi()) / float(window_->GetMediumDpi());
+}
+
+void ImGuiDrawer::UpdateTextures(ImDrawData* data) {
+  if (!data->Textures) {
     return;
   }
-  ImGuiIO& io = GetIO();
-  unsigned char* pixels;
-  int width, height;
-  io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-  font_texture_ = immediate_drawer_->CreateTexture(width, height, ImmediateTextureFilter::kLinear,
-                                                   true, reinterpret_cast<uint8_t*>(pixels));
-  io.Fonts->TexID = reinterpret_cast<ImTextureID>(font_texture_.get());
+  for (ImTextureData* texture : *data->Textures) {
+    switch (texture->Status) {
+      case ImTextureStatus_WantCreate:
+      case ImTextureStatus_WantUpdates: {
+        // An update makes the whole texture again: the atlas changes only when glyphs or sizes not drawn before
+        // appear. The texture it replaces is released by its drawer once the GPU is done with it.
+        assert_true(texture->Format == ImTextureFormat_RGBA32);
+        std::unique_ptr<ImmediateTexture>& entry = textures_[texture];
+        entry = immediate_drawer_->CreateTexture(
+            uint32_t(texture->Width), uint32_t(texture->Height), ImmediateTextureFilter::kLinear, true,
+            static_cast<const uint8_t*>(texture->GetPixels()));
+        texture->SetTexID(reinterpret_cast<ImTextureID>(entry.get()));
+        texture->SetStatus(ImTextureStatus_OK);
+        break;
+      }
+      case ImTextureStatus_WantDestroy:
+        textures_.erase(texture);
+        texture->SetTexID(ImTextureID_Invalid);
+        texture->SetStatus(ImTextureStatus_Destroyed);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+void ImGuiDrawer::DestroyTextures() {
+  ImGui::SetCurrentContext(internal_state_);
+  for (ImTextureData* texture : ImGui::GetPlatformIO().Textures) {
+    if (texture->Status != ImTextureStatus_Destroyed) {
+      texture->SetTexID(ImTextureID_Invalid);
+      // Asked for again on the next frame (SetStatus turns a Destroyed that ImGui did not plan into WantCreate).
+      texture->SetStatus(ImTextureStatus_Destroyed);
+    }
+  }
+  textures_.clear();
 }
 
 void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
@@ -363,17 +448,11 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
     return;
   }
   if (immediate_drawer_) {
-    GetIO().Fonts->TexID = ImTextureID{};
-    font_texture_.reset();
+    DestroyTextures();
   }
   immediate_drawer_ = new_immediate_drawer;
-  // Eagerly upload the font atlas only when a presenter is attached (SDK mode).
-  // In detached mode (presenter_ == nullptr) the app's renderer device may not
-  // exist yet at SetupPresentation, so defer to the idempotent Draw-time
-  // SetupFontTexture().
-  if (immediate_drawer_ && presenter_) {
-    SetupFontTexture();
-  }
+  // The textures are made with the new drawer when the next frame is rendered (UpdateTextures): in detached mode
+  // (presenter_ == nullptr) the app's renderer device may not exist yet at SetupPresentation.
 }
 
 void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
@@ -383,12 +462,6 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
     // A drawer target has been attached, but an immediate drawer hasn't yet.
     return;
   }
-
-  // In detached mode the app's immediate drawer (and the renderer device
-  // backing it) may only become usable on the first frame, after the guest
-  // creates its D3D device. Upload the font atlas lazily and idempotently;
-  // SetupFontTexture early-returns once font_texture_ is set.
-  SetupFontTexture();
 
   if (dialogs_.empty()) {
     return;
@@ -457,6 +530,8 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
 
 void ImGuiDrawer::RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_context) {
   ImGuiIO& io = ImGui::GetIO();
+
+  UpdateTextures(data);
 
   immediate_drawer_->Begin(ui_draw_context, io.DisplaySize.x, io.DisplaySize.y);
 

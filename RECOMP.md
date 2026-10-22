@@ -55,6 +55,7 @@ None of them is specific to one game; the options they add are off by default.
 | 24 | CMake: rexruntime and the GPU plugins are copied next to the executable on every build, not only when it links again |
 | 25 | Code generator: a `share_registers` function (an SEH funclet, a setjmp caller) keeps its registers across calls when the others are local variables |
 | 36 | `gamepad_remap`: a controller's buttons and triggers moved to other Xbox 360 controls, per SDL gamepad type (`ps5:a=east,b=south`; `*` for any), applied by the SDL driver; empty keeps the standard layout. The games' launchers edit it |
+| 37 | Dear ImGui's textures made on request (`ImGuiBackendFlags_RendererHasTextures`): fonts are rasterized at any size they are drawn at, and a renderer that draws the dialogs with its own immediate drawer gets the font atlas made with it. Barlow (SIL OFL 1.1, `resources/fonts`) embedded for the SDK's dialogs, a common dialog style (`DialogStyle`, scaled with the screen's height) and language (`SetOverlayLanguage`), and the quit prompt drawn in them |
 
 ## For NativeXRenderer
 

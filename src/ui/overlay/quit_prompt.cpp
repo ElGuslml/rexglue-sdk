@@ -22,7 +22,10 @@
 #include <rex/system/flags.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
+#include <rex/ui/overlay/overlay_language.h>
 #include <rex/ui/windowed_app_context.h>
+
+#include "ui/overlay/dialog_draw.h"
 
 REXCVAR_DEFINE_BOOL(quit_prompt, true, "UI",
                     "Ask before quitting when the game offers it: B on a screen such as its title screen opens "
@@ -44,8 +47,7 @@ struct Texts {
   const char* cancel;
 };
 
-// XLanguage (user_language) -> texts. The default ImGui font has Latin-1 and, on Windows, Japanese: the
-// languages it cannot draw (Korean, Chinese, Polish, Russian) get English.
+// XLanguage (OverlayLanguage()) -> texts; the others (Korean, Chinese, Polish, Russian) get English.
 const Texts& TextsFor(uint32_t language) {
   static const Texts kEnglish = {"Are you sure you want to quit the game?", "Quit", "Cancel"};
   static const Texts kJapanese = {"ゲームを終了しますか？", "終了", "キャンセル"};
@@ -84,7 +86,6 @@ struct State {
   std::function<void()> accept;
   std::atomic<int64_t> offered_at{0};  // Clock ticks of the last OfferQuitPrompt(); 0 = never
   std::function<bool()> condition;     // SetQuitPromptCondition(): asked when a press of B begins
-  std::atomic<uint32_t> language{0};    // SetQuitPromptLanguage(); 0 = user_language
   bool open = false;                   // the dialog is open (or opening); the input blocker is held
   bool accepted = false;               // the player confirmed: the window is closing
   std::array<uint16_t, kMaxUsers> buttons{};  // each user's buttons at the guest's last read (the filter)
@@ -127,45 +128,56 @@ class QuitPromptDialog final : public ImGuiDialog {
       Cancel();
     }
 
-    uint32_t language = GetState().language.load(std::memory_order_relaxed);
-    const Texts& texts = TextsFor(language ? language : REXCVAR_GET(user_language));
-    // The default font is a 10-pixel bitmap font: scaled by whole steps with the screen's height, so that the
-    // text is about 1/36 of it.
-    float scale = std::max(1.0f, std::floor(io.DisplaySize.y / 360.0f));
+    const Texts& texts = TextsFor(OverlayLanguage());
+    // The recomp branch's dialog style (DialogStyle, in Barlow), scaled with the screen's height.
+    using dialog::Font;
+    float scale = dialog::Painter::ScaleFor(io);
+    dialog::Painter back(imgui_drawer(), ImGui::GetBackgroundDrawList(), scale);
+    const DialogStyle& s = back.style();
 
-    // The game dimmed behind the dialog.
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 150));
+    // The layout, in pixels of a 720-line screen.
+    constexpr float kPad = 28.0f, kQuestionEm = 18.0f, kChoiceHeight = 40.0f, kGap = 12.0f;
+    float max_text = std::min(back.Px(520.0f), io.DisplaySize.x - back.Px(96.0f));
+    float question_width = std::min(back.Measure(Font::kSemiBold, kQuestionEm, texts.question), max_text);
+    float question_height =
+        back.Paragraph(Font::kSemiBold, kQuestionEm, ImVec2(0, 0), max_text, s.text, texts.question, 0, false);
+    float quit_width = ChoiceWidth(back, texts.quit);
+    float cancel_width = ChoiceWidth(back, texts.cancel);
+    float choices_width = quit_width + back.Px(kGap) + cancel_width;
+    float width = std::max({question_width, choices_width, back.Px(300.0f)}) + back.Px(kPad) * 2.0f;
+    float height = back.Px(kPad) * 2.0f + question_height + back.Px(22.0f) + back.Px(kChoiceHeight);
+    ImVec2 min(std::floor((io.DisplaySize.x - width) * 0.5f), std::floor((io.DisplaySize.y - height) * 0.5f));
+    ImVec2 max(min.x + width, min.y + height);
 
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
-                            ImVec2(0.5f, 0.5f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f * scale, 10.0f * scale));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f * scale, 8.0f * scale));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f * scale);
+    // The game dimmed behind the dialog, the card.
+    back.list()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, back.Color(s.dim_background));
+    back.Shadow(min, max, s.rounding);
+    back.Rect(min, max, s.background, s.rounding);
+    back.Border(min, max, s.border, s.rounding);
+
+    ImGui::SetNextWindowPos(min, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("##quit_prompt", nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
-    ImGui::SetWindowFontScale(scale);
-    ImGui::TextUnformatted(texts.question);
-    ImGui::Dummy(ImVec2(0, 4.0f * scale));
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav);
+    dialog::Painter p(imgui_drawer(), ImGui::GetWindowDrawList(), scale);
+    // The question, centered line by line.
+    p.Paragraph(Font::kSemiBold, kQuestionEm, ImVec2(min.x + (width - max_text) * 0.5f, min.y + p.Px(kPad)),
+                max_text, s.text, texts.question, 0, true, 0.5f);
     // The two choices, centered under the question.
-    float width_a = ChoiceWidth(texts.quit, scale);
-    float width_b = ChoiceWidth(texts.cancel, scale);
-    float gap = 24.0f * scale;
-    float total = width_a + gap + width_b;
-    float offset = (ImGui::GetContentRegionAvail().x - total) * 0.5f;
-    if (offset > 0) {
-      ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
-    }
-    if (Choice("##quit", 'A', IM_COL32(96, 176, 48, 255), texts.quit, scale)) {
+    float choice_y = max.y - p.Px(kPad) - p.Px(kChoiceHeight);
+    float choice_x = min.x + (width - choices_width) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(choice_x, choice_y));
+    if (Choice(p, "##quit", 'A', ImVec4(0.376f, 0.690f, 0.188f, 1.0f), texts.quit, quit_width)) {
       Accept();
     }
-    ImGui::SameLine(0, gap);
-    if (Choice("##cancel", 'B', IM_COL32(200, 48, 48, 255), texts.cancel, scale)) {
+    ImGui::SetCursorScreenPos(ImVec2(choice_x + quit_width + p.Px(kGap), choice_y));
+    if (Choice(p, "##cancel", 'B', ImVec4(0.784f, 0.188f, 0.188f, 1.0f), texts.cancel, cancel_width)) {
       Cancel();
     }
     ImGui::End();
-    ImGui::PopStyleVar(3);
+    ImGui::PopStyleVar();
   }
 
  private:
@@ -194,31 +206,32 @@ class QuitPromptDialog final : public ImGuiDialog {
     }
   }
 
-  // A choice: the controller button as a colored disc with its letter, then the label. Clickable.
-  static float ChoiceWidth(const char* label, float scale) {
-    float disc = ImGui::GetTextLineHeight() * 1.5f;
-    return disc + 6.0f * scale + ImGui::CalcTextSize(label).x;
+  // A choice: a rounded button with the controller button as a colored disc with its letter, then the label.
+  // Clickable.
+  static float ChoiceWidth(const dialog::Painter& p, const char* label) {
+    return p.Px(14.0f + 24.0f + 10.0f + 18.0f) + p.Measure(dialog::Font::kSemiBold, 15.0f, label);
   }
 
-  static bool Choice(const char* id, char letter, ImU32 color, const char* label, float scale) {
-    float line = ImGui::GetTextLineHeight();
-    float disc = line * 1.5f;
-    ImVec2 size(ChoiceWidth(label, scale), disc);
+  bool Choice(const dialog::Painter& p, const char* id, char letter, const ImVec4& color, const char* label,
+              float width) {
+    using dialog::Font;
+    const DialogStyle& s = p.style();
     ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 size(width, p.Px(40.0f));
     bool clicked = ImGui::InvisibleButton(id, size);
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    ImVec2 center(origin.x + disc * 0.5f, origin.y + disc * 0.5f);
-    if (ImGui::IsItemHovered()) {
-      draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(255, 255, 255, 30),
-                          4.0f * scale);
-    }
-    draw->AddCircleFilled(center, disc * 0.5f, color);
+    bool hovered = ImGui::IsItemHovered();
+    ImVec2 max(origin.x + size.x, origin.y + size.y);
+    p.Rect(origin, max, hovered ? s.hover : s.raised, 20.0f);
+    float disc = p.Px(24.0f);
+    ImVec2 center(origin.x + p.Px(14.0f) + disc * 0.5f, origin.y + size.y * 0.5f);
+    p.list()->AddCircleFilled(center, disc * 0.5f, p.Color(color));
     char text[2] = {letter, 0};
-    ImVec2 letter_size = ImGui::CalcTextSize(text);
-    draw->AddText(ImVec2(center.x - letter_size.x * 0.5f, center.y - letter_size.y * 0.5f),
-                  IM_COL32(255, 255, 255, 255), text);
-    draw->AddText(ImVec2(origin.x + disc + 6.0f * scale, origin.y + (disc - line) * 0.5f),
-                  ImGui::GetColorU32(ImGuiCol_Text), label);
+    float letter_width = p.Measure(Font::kCondensedBold, 14.0f, text);
+    p.Text(Font::kCondensedBold, 14.0f,
+           ImVec2(center.x - letter_width * 0.5f, center.y - p.LineHeight(14.0f) * 0.5f), ImVec4(1, 1, 1, 1), text);
+    p.Text(Font::kSemiBold, 15.0f,
+           ImVec2(origin.x + p.Px(14.0f) + disc + p.Px(10.0f), origin.y + (size.y - p.LineHeight(15.0f)) * 0.5f),
+           s.text, label);
     return clicked;
   }
 
@@ -323,7 +336,7 @@ void SetQuitPromptCondition(std::function<bool()> condition) {
 }
 
 void SetQuitPromptLanguage(uint32_t xlanguage) {
-  GetState().language.store(xlanguage, std::memory_order_relaxed);
+  SetOverlayLanguage(xlanguage);
 }
 
 bool IsQuitPromptOpen() {

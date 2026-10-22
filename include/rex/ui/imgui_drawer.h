@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <rex/ui/immediate_drawer.h>
@@ -63,6 +64,21 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   void Draw(UIDrawContext& ui_draw_context) override;
 
+  // The drawer the dialogs are drawn with: the presenter's, or a renderer's own. A texture a dialog draws with
+  // ImGui::Image must come from it, and be made again when it changes (nullptr until one is attached).
+  ImmediateDrawer* immediate_drawer() const { return immediate_drawer_; }
+
+  // The fonts of the recomp branch's dialogs (the achievement toast and list, the quit prompt): Barlow
+  // (resources/fonts, SIL Open Font License 1.1), with MS Gothic merged for Japanese where Windows has it. The
+  // default font stays ProggyTiny. Any size can be pushed (ImGui::PushFont(font, size)): the textures are made on
+  // request (ImGuiBackendFlags_RendererHasTextures), so the atlas rasterizes the glyphs at the size drawn.
+  enum class Font { kRegular, kSemiBold, kCondensedBold, kCount };
+  ImFont* font(Font which) const { return fonts_[size_t(which)]; }
+
+  // Physical pixels per ImGui unit (the window's DPI over the medium DPI). A dialog that wants text rasterized at
+  // the screen's resolution sets it as the font density (ImGui::SetFontRasterizerDensity) around its fonts.
+  float dpi_scale() const;
+
  protected:
   void OnKeyDown(KeyEvent& e) override;
   void OnKeyUp(KeyEvent& e) override;
@@ -77,7 +93,13 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
  private:
   void Initialize();
 
-  void SetupFontTexture();
+  void AddDialogFonts();
+
+  // The textures Dear ImGui asks for (the font atlas): made, made again and destroyed with the immediate drawer.
+  void UpdateTextures(ImDrawData* data);
+  // Every texture made with the current immediate drawer, before it changes or goes; Dear ImGui asks for them
+  // again on the next frame.
+  void DestroyTextures();
 
   void RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_context);
 
@@ -112,7 +134,11 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   ImmediateDrawer* immediate_drawer_ = nullptr;
   // Resources specific to an immediate drawer - must be destroyed before
   // detaching the presenter.
-  std::unique_ptr<ImmediateTexture> font_texture_;
+  std::unordered_map<ImTextureData*, std::unique_ptr<ImmediateTexture>> textures_;
+
+  ImFont* fonts_[size_t(Font::kCount)] = {};
+  // MS Gothic's file, read once and merged into each of fonts_ (the atlas does not own it).
+  std::vector<uint8_t> japanese_font_;
 
   // If there's an active pointer, the ImGui mouse is controlled by this touch.
   // If it's TouchEvent::kPointerIDNone, the ImGui mouse is controlled by the

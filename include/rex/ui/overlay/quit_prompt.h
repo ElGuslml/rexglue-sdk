@@ -24,7 +24,7 @@ class WindowedAppContext;
 //   that the filter runs when a press of B begins: for a game whose screens change on events rather than in code
 //   that runs every frame (POTCAWERecomp, its menus).
 // A press of B that begins while it is offered opens a dialog, "Are you sure you want to quit the game?" in the
-// game's language (user_language), which A or Enter accepts (the window closes, as with its close button) and B
+// game's language (OverlayLanguage(): user_language, or what the game set), which A or Enter accepts (the window closes, as with its close button) and B
 // or Escape cancels; the mouse works too.
 //
 // The game never sees those presses. The press of B that opens the dialog is taken from the guest's read
@@ -57,8 +57,8 @@ void OfferQuitPrompt();
 // it must not call back into this API. An empty function removes it. Works together with OfferQuitPrompt().
 void SetQuitPromptCondition(std::function<bool()> condition);
 
-// The dialog's language (an XLanguage, as user_language): for a game that asks for its language in its own menu
-// instead of following user_language (POTCAWERecomp passes the Windows display language). 0 = user_language.
+// The dialog's language: the same as SetOverlayLanguage (rex/ui/overlay/overlay_language.h), which sets it for
+// every dialog of the SDK; kept for the games that call it.
 void SetQuitPromptLanguage(uint32_t xlanguage);
 
 // Whether the dialog is open.
