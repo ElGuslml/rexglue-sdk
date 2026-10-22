@@ -19,6 +19,8 @@
 
 namespace rex::ui {
 
+// AchievementsStyle and ToastStyle are upstream's; on the recomp branch the achievement list and toast are drawn
+// with DialogStyle instead (RECOMP.md), and these two are not read.
 struct AchievementsStyle {
   ImVec4 unlocked_title{0.45f, 1.00f, 0.55f, 1.00f};
   ImVec4 unlocked_desc{0.70f, 0.85f, 0.72f, 1.00f};

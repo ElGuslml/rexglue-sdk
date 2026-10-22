@@ -31,6 +31,7 @@
 #include <chrono>
 #include <thread>
 
+#include <rex/system/achievement_cache.h>
 #include <rex/system/flags.h>
 #include <rex/system/guest_path.h>
 #include <rex/system/user_module.h>
@@ -311,6 +312,11 @@ void KernelState::LoadAchievementsData() {
     achievement_manager_.SetUnlockSavePath(user_root / "achievements" /
                                            fmt::format("{:08X}.toml", title_id()));
     achievement_manager_.LoadUnlockState();
+    // The achievements for launchers, next to the unlocks (recomp branch).
+    if (db.is_valid()) {
+      WriteAchievementCache(db, title_id(), static_cast<XLanguage>(REXCVAR_GET(user_language)),
+                            achievement_manager_.ListAchievements(), user_root / "achievements");
+    }
   }
 }
 

@@ -25,12 +25,16 @@ class Runtime;
 
 namespace rex::ui {
 
+class ImGuiDrawer;
 class ImmediateDrawer;
 class ImmediateTexture;
 
 class AchievementIconCache {
  public:
-  AchievementIconCache(ImmediateDrawer* immediate_drawer, rex::Runtime* runtime);
+  // The textures are made with the ImGuiDrawer's current immediate drawer, the one the dialogs are drawn with (a
+  // renderer that draws them on its own swap chain has its own), and made again when it changes (recomp branch,
+  // RECOMP.md).
+  AchievementIconCache(ImGuiDrawer* imgui_drawer, rex::Runtime* runtime);
 
   // Loads the achievement icon in priority order:
   // 1. explicit metadata icon_path
@@ -45,7 +49,8 @@ class AchievementIconCache {
   std::unique_ptr<ImmediateTexture> LoadMetadataTexture(const std::filesystem::path& relative_path);
   std::unique_ptr<ImmediateTexture> LoadXdbfTexture(uint32_t image_id);
 
-  ImmediateDrawer* immediate_drawer_ = nullptr;
+  ImGuiDrawer* imgui_drawer_ = nullptr;
+  ImmediateDrawer* immediate_drawer_ = nullptr;  // the drawer cache_'s textures were made with
   rex::Runtime* runtime_ = nullptr;
   std::unordered_map<std::string, std::unique_ptr<ImmediateTexture>> cache_;
 };

@@ -49,6 +49,11 @@
 #include <filesystem>
 #include <string_view>
 
+REXCVAR_DEFINE_BOOL(achievements_cache_only, false, "UI",
+                    "Write the title's achievements for a launcher (the user data's achievements folder: "
+                    "<TITLEID>.info.toml and the icons) and quit without starting the game")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
@@ -61,6 +66,35 @@ REXCVAR_DEFINE_STRING(gpu_backend, "any", "GPU",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
+
+namespace {
+
+// --achievements_cache_only: the executable is loaded by a runtime in tool mode, as `rexglue init achievements`
+// does (no window, no GPU, no guest thread), and loading it writes the achievements' cache for launchers
+// (KernelState::LoadAchievementsData, rex/system/achievement_cache.h).
+void WriteAchievementCacheOnly(const PathConfig& paths) {
+  if (paths.game_data_root.empty() || paths.user_data_root.empty()) {
+    REXLOG_ERROR("achievements_cache_only: the game data or user data folder is not set");
+    return;
+  }
+  auto runtime = std::make_unique<rex::Runtime>(paths.game_data_root, paths.user_data_root, paths.update_data_root,
+                                                paths.cache_root, paths.metadata_root);
+  auto status = runtime->Setup(rex::RuntimeConfig{.kernel_init = rex::kernel::InitializeKernel, .tool_mode = true});
+  if (XFAILED(status)) {
+    REXLOG_ERROR("achievements_cache_only: runtime setup failed: {:08X}", status);
+    return;
+  }
+  status = runtime->LoadXexImage("game:\\default.xex");
+  if (XFAILED(status)) {
+    REXLOG_ERROR("achievements_cache_only: failed to load the executable: {:08X}", status);
+    return;
+  }
+  REXLOG_INFO("achievements_cache_only: {} achievements written to {}",
+              runtime->kernel_state()->achievements().ListAchievements().size(),
+              (paths.user_data_root / "achievements").string());
+}
+
+}  // namespace
 
 // --- ReXApp ---
 
@@ -95,6 +129,11 @@ system::AchievementManager& ReXApp::achievements() const {
 bool ReXApp::OnInitialize() {
   if (!SetupEnvironment())
     return false;
+  if (REXCVAR_GET(achievements_cache_only)) {
+    WriteAchievementCacheOnly(resolved_defaults_);
+    app_context().RequestDeferredQuit();
+    return true;
+  }
   if (!SetupPresentation())
     return false;
 

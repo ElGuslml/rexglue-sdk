@@ -19,14 +19,23 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/xdbf_utils.h>
 #include <rex/ui/image_decode.h>
+#include <rex/ui/imgui_drawer.h>
 #include <rex/ui/immediate_drawer.h>
 
 namespace rex::ui {
 
-AchievementIconCache::AchievementIconCache(ImmediateDrawer* immediate_drawer, rex::Runtime* runtime)
-    : immediate_drawer_(immediate_drawer), runtime_(runtime) {}
+AchievementIconCache::AchievementIconCache(ImGuiDrawer* imgui_drawer, rex::Runtime* runtime)
+    : imgui_drawer_(imgui_drawer), runtime_(runtime) {}
 
 ImmediateTexture* AchievementIconCache::GetIcon(const rex::system::AchievementInfo& achievement) {
+  ImmediateDrawer* current = imgui_drawer_ ? imgui_drawer_->immediate_drawer() : nullptr;
+  if (current != immediate_drawer_) {
+    cache_.clear();
+    immediate_drawer_ = current;
+  }
+  if (!immediate_drawer_) {
+    return nullptr;
+  }
   const std::string cache_key =
       "path:" + achievement.icon_path + "|image:" + std::to_string(achievement.image_id);
   auto it = cache_.find(cache_key);
