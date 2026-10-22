@@ -54,6 +54,7 @@ None of them is specific to one game; the options they add are off by default.
 | 23 | `WAIT_REG_MEM` polls every 100 µs with the high-resolution timer instead of sleeping 1 ms |
 | 24 | CMake: rexruntime and the GPU plugins are copied next to the executable on every build, not only when it links again |
 | 25 | Code generator: a `share_registers` function (an SEH funclet, a setjmp caller) keeps its registers across calls when the others are local variables |
+| 36 | `gamepad_remap`: a controller's buttons and triggers moved to other Xbox 360 controls, per SDL gamepad type (`ps5:a=east,b=south`; `*` for any), applied by the SDL driver; empty keeps the standard layout. The games' launchers edit it |
 
 ## For NativeXRenderer
 

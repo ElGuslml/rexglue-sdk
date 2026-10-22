@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -43,6 +44,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
                               X_INPUT_KEYSTROKE* out_keystroke) override;
   void OnWindowAvailable(rex::ui::Window* window) override;
 
+  // The Xbox 360 controls gamepad_remap can move: A B X Y LB RB LT RT LS RS Start Back Guide (the D-pad stays).
+  static constexpr int kRemapControls = 13;
+
  private:
   enum class RepeatState {
     Idle,       // no buttons pressed or repeating has ended
@@ -67,6 +71,13 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     DeviceId id;
     // Per pad rather than per guest user, so it survives reassignment.
     KeystrokeState keystroke;
+    // What the controller itself reports: the SDL_GamepadButton bits held and the two triggers (0-255). The
+    // guest's buttons and triggers are computed from them through `sources` (gamepad_remap).
+    uint64_t physical_buttons;
+    uint8_t physical_triggers[2];
+    // For each remappable control, the physical inputs that press it (SDL_GamepadButton bits; bits 32 and 33
+    // are the left and right triggers).
+    std::array<uint64_t, kRemapControls> sources;
   };
 
   // WindowListener
@@ -89,6 +100,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   DeviceId AllocateDeviceId();
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
+  // The guest's buttons and triggers from the physical ones, through gamepad_remap.
+  static void ApplyRemap(ControllerState& state);
   void QueueControllerUpdate();
 
   rex::ui::Window* attached_window_ = nullptr;

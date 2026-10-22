@@ -13,7 +13,9 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
@@ -25,10 +27,184 @@
 
 REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
                       "Path to SDL gamecontroller mappings file");
+REXCVAR_DEFINE_STRING(gamepad_remap, "", "Input",
+                      "Controller buttons moved to other Xbox 360 controls: sections 'type:control=input,...' "
+                      "joined by ';'. type is SDL's gamepad type (xbox360, xboxone, ps3, ps4, ps5, switchpro, "
+                      "joyconpair, standard...) or * for any; control is a b x y lb rb lt rt ls rs start back "
+                      "guide; input is the controller's south east west north lb rb lt rt ls rs start back guide "
+                      "dpup dpdown dpleft dpright misc1-6 paddle1-4 touchpad, alternatives joined by '|'. Empty: "
+                      "the standard layout. Example: 'ps5:a=east,b=south'");
 
 namespace rex::input::sdl {
 
 namespace {
+
+// --- gamepad_remap ---
+
+// Physical inputs are SDL_GamepadButton bits, and these two for the triggers.
+constexpr int kInputLeftTrigger = 32;
+constexpr int kInputRightTrigger = 33;
+
+constexpr uint64_t Bit(int input) { return uint64_t(1) << input; }
+
+// The remappable Xbox 360 controls, in SDLInputDriver::ControllerState::sources order.
+enum RemapControl : int { kA, kB, kX, kY, kLB, kRB, kLT, kRT, kLS, kRS, kStart, kBack, kGuide };
+constexpr const char* kControlNames[] = {"a",  "b",  "x",  "y",     "lb",   "rb",   "lt",
+                                         "rt", "ls", "rs", "start", "back", "guide"};
+// The guest's button for each control (the triggers are analog).
+constexpr uint16_t kControlButtons[] = {
+    X_INPUT_GAMEPAD_A,          X_INPUT_GAMEPAD_B,     X_INPUT_GAMEPAD_X,
+    X_INPUT_GAMEPAD_Y,          X_INPUT_GAMEPAD_LEFT_SHOULDER,
+    X_INPUT_GAMEPAD_RIGHT_SHOULDER,
+    0,                          0,                     X_INPUT_GAMEPAD_LEFT_THUMB,
+    X_INPUT_GAMEPAD_RIGHT_THUMB, X_INPUT_GAMEPAD_START, X_INPUT_GAMEPAD_BACK,
+    X_INPUT_GAMEPAD_GUIDE};
+static_assert(std::size(kControlNames) == SDLInputDriver::kRemapControls);
+static_assert(std::size(kControlButtons) == SDLInputDriver::kRemapControls);
+
+struct InputName {
+  const char* name;
+  int input;
+};
+constexpr InputName kInputNames[] = {
+    {"south", SDL_GAMEPAD_BUTTON_SOUTH},
+    {"east", SDL_GAMEPAD_BUTTON_EAST},
+    {"west", SDL_GAMEPAD_BUTTON_WEST},
+    {"north", SDL_GAMEPAD_BUTTON_NORTH},
+    {"back", SDL_GAMEPAD_BUTTON_BACK},
+    {"guide", SDL_GAMEPAD_BUTTON_GUIDE},
+    {"start", SDL_GAMEPAD_BUTTON_START},
+    {"ls", SDL_GAMEPAD_BUTTON_LEFT_STICK},
+    {"rs", SDL_GAMEPAD_BUTTON_RIGHT_STICK},
+    {"lb", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
+    {"rb", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
+    {"dpup", SDL_GAMEPAD_BUTTON_DPAD_UP},
+    {"dpdown", SDL_GAMEPAD_BUTTON_DPAD_DOWN},
+    {"dpleft", SDL_GAMEPAD_BUTTON_DPAD_LEFT},
+    {"dpright", SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
+    {"misc1", SDL_GAMEPAD_BUTTON_MISC1},
+    // SDL's mapping strings number the paddles in this order (paddle1 is the Elite's P1).
+    {"paddle1", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1},
+    {"paddle2", SDL_GAMEPAD_BUTTON_LEFT_PADDLE1},
+    {"paddle3", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2},
+    {"paddle4", SDL_GAMEPAD_BUTTON_LEFT_PADDLE2},
+    {"touchpad", SDL_GAMEPAD_BUTTON_TOUCHPAD},
+    {"misc2", SDL_GAMEPAD_BUTTON_MISC2},
+    {"misc3", SDL_GAMEPAD_BUTTON_MISC3},
+    {"misc4", SDL_GAMEPAD_BUTTON_MISC4},
+    {"misc5", SDL_GAMEPAD_BUTTON_MISC5},
+    {"misc6", SDL_GAMEPAD_BUTTON_MISC6},
+    {"lt", kInputLeftTrigger},
+    {"rt", kInputRightTrigger},
+};
+
+// The standard layout, as the fixed table before gamepad_remap had it: the Elite's paddles press the face
+// buttons, Misc1 and the PlayStation touchpad press Guide.
+constexpr std::array<uint64_t, SDLInputDriver::kRemapControls> kDefaultSources = {
+    Bit(SDL_GAMEPAD_BUTTON_SOUTH) | Bit(SDL_GAMEPAD_BUTTON_LEFT_PADDLE2),
+    Bit(SDL_GAMEPAD_BUTTON_EAST) | Bit(SDL_GAMEPAD_BUTTON_LEFT_PADDLE1),
+    Bit(SDL_GAMEPAD_BUTTON_WEST) | Bit(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2),
+    Bit(SDL_GAMEPAD_BUTTON_NORTH) | Bit(SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1),
+    Bit(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER),
+    Bit(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER),
+    Bit(kInputLeftTrigger),
+    Bit(kInputRightTrigger),
+    Bit(SDL_GAMEPAD_BUTTON_LEFT_STICK),
+    Bit(SDL_GAMEPAD_BUTTON_RIGHT_STICK),
+    Bit(SDL_GAMEPAD_BUTTON_START),
+    Bit(SDL_GAMEPAD_BUTTON_BACK),
+    Bit(SDL_GAMEPAD_BUTTON_GUIDE) | Bit(SDL_GAMEPAD_BUTTON_MISC1) | Bit(SDL_GAMEPAD_BUTTON_TOUCHPAD),
+};
+
+std::string_view Trim(std::string_view s) {
+  while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+    s.remove_prefix(1);
+  }
+  while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+    s.remove_suffix(1);
+  }
+  return s;
+}
+
+// Calls `f` with each trimmed piece of `s` between `separator`s.
+template <typename F>
+void ForEachPiece(std::string_view s, char separator, F f) {
+  while (true) {
+    size_t end = s.find(separator);
+    f(Trim(s.substr(0, end)));
+    if (end == std::string_view::npos) {
+      return;
+    }
+    s.remove_prefix(end + 1);
+  }
+}
+
+bool EqualsCI(std::string_view a, std::string_view b) {
+  return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+           return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+         });
+}
+
+// The sources of each control for a controller of `type`: the standard layout, then gamepad_remap's '*'
+// sections, then the sections for this type. `changes` lists what differs from the standard layout.
+std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType type, std::string& changes) {
+  std::array<uint64_t, SDLInputDriver::kRemapControls> sources = kDefaultSources;
+  const std::string& text = REXCVAR_GET(gamepad_remap);
+  const char* type_name = SDL_GetGamepadStringForType(type);
+  for (int pass = 0; pass < 2; ++pass) {
+    ForEachPiece(text, ';', [&](std::string_view section) {
+      size_t colon = section.find(':');
+      if (colon == std::string_view::npos) {
+        return;
+      }
+      std::string_view section_type = Trim(section.substr(0, colon));
+      bool match = pass == 0 ? section_type == "*" : (type_name && EqualsCI(section_type, type_name));
+      if (!match) {
+        return;
+      }
+      ForEachPiece(section.substr(colon + 1), ',', [&](std::string_view entry) {
+        size_t equals = entry.find('=');
+        if (entry.empty() || equals == std::string_view::npos) {
+          return;
+        }
+        std::string_view control = Trim(entry.substr(0, equals));
+        auto c = std::find_if(std::begin(kControlNames), std::end(kControlNames),
+                              [&](const char* name) { return EqualsCI(control, name); });
+        if (c == std::end(kControlNames)) {
+          REXLOG_WARN("gamepad_remap: unknown control '{}'", control);
+          return;
+        }
+        uint64_t mask = 0;
+        ForEachPiece(entry.substr(equals + 1), '|', [&](std::string_view input) {
+          if (input.empty()) {
+            return;  // "a=": the control is not on the controller at all
+          }
+          auto i = std::find_if(std::begin(kInputNames), std::end(kInputNames),
+                                [&](const InputName& n) { return EqualsCI(input, n.name); });
+          if (i == std::end(kInputNames)) {
+            REXLOG_WARN("gamepad_remap: unknown input '{}'", input);
+            return;
+          }
+          mask |= Bit(i->input);
+        });
+        sources[size_t(c - std::begin(kControlNames))] = mask;
+      });
+    });
+  }
+  for (int c = 0; c < SDLInputDriver::kRemapControls; ++c) {
+    if (sources[c] == kDefaultSources[c]) {
+      continue;
+    }
+    std::string inputs;
+    for (const InputName& n : kInputNames) {
+      if (sources[c] & Bit(n.input)) {
+        inputs += (inputs.empty() ? "" : "|") + std::string(n.name);
+      }
+    }
+    changes += (changes.empty() ? "" : ",") + std::string(kControlNames[c]) + "=" + inputs;
+  }
+  return sources;
+}
 
 // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
 constexpr uint32_t kRumbleDurationMs = 0xFFFF;
@@ -618,6 +794,12 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
   state.sdl = controller;
   state.id = AllocateDeviceId();
   state.state_changed = true;  // XInput starts with packet_number = 1
+  std::string remap_changes;
+  state.sources = RemapFor(SDL_GetGamepadType(controller), remap_changes);
+  if (!remap_changes.empty()) {
+    REXLOG_INFO("SDL OnControllerDeviceAdded: gamepad_remap for {}: {}",
+                SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
+  }
   UpdateXCapabilities(state);
   controllers_.push_back(state);
 
@@ -662,7 +844,8 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
     // The pad can be removed between the event being posted and drained.
     return;
   }
-  auto& pad = controllers_.at(*idx).state.gamepad;
+  auto& controller = controllers_.at(*idx);
+  auto& pad = controller.state.gamepad;
   switch (event.gaxis.axis) {
     case SDL_GAMEPAD_AXIS_LEFTX:
       pad.thumb_lx = event.gaxis.value;
@@ -676,55 +859,23 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
     case SDL_GAMEPAD_AXIS_RIGHTY:
       pad.thumb_ry = ~event.gaxis.value;
       break;
+    // The triggers go through gamepad_remap, like the buttons.
     case SDL_GAMEPAD_AXIS_LEFT_TRIGGER:
-      pad.left_trigger = static_cast<uint8_t>(event.gaxis.value >> 7);
+      controller.physical_triggers[0] = static_cast<uint8_t>(event.gaxis.value >> 7);
+      ApplyRemap(controller);
       break;
     case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER:
-      pad.right_trigger = static_cast<uint8_t>(event.gaxis.value >> 7);
+      controller.physical_triggers[1] = static_cast<uint8_t>(event.gaxis.value >> 7);
+      ApplyRemap(controller);
       break;
     default:
       assert_always();
       break;
   }
-  controllers_.at(*idx).state_changed = true;
+  controller.state_changed = true;
 }
 
 void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& event) {
-  // Define a lookup table to map between SDL and XInput button codes.
-  // These need to be in the order of the SDL_GamepadButton enum.
-  static constexpr std::array<std::underlying_type<X_INPUT_GAMEPAD_BUTTON>::type, 21>
-      xbutton_lookup = {
-          // Standard buttons:
-          X_INPUT_GAMEPAD_A,
-          X_INPUT_GAMEPAD_B,
-          X_INPUT_GAMEPAD_X,
-          X_INPUT_GAMEPAD_Y,
-          X_INPUT_GAMEPAD_BACK,
-          X_INPUT_GAMEPAD_GUIDE,
-          X_INPUT_GAMEPAD_START,
-          X_INPUT_GAMEPAD_LEFT_THUMB,
-          X_INPUT_GAMEPAD_RIGHT_THUMB,
-          X_INPUT_GAMEPAD_LEFT_SHOULDER,
-          X_INPUT_GAMEPAD_RIGHT_SHOULDER,
-          X_INPUT_GAMEPAD_DPAD_UP,
-          X_INPUT_GAMEPAD_DPAD_DOWN,
-          X_INPUT_GAMEPAD_DPAD_LEFT,
-          X_INPUT_GAMEPAD_DPAD_RIGHT,
-          // There are additional buttons only available on some controllers.
-          // For now just assign sensible defaults
-          // Misc:
-          X_INPUT_GAMEPAD_GUIDE,
-          // Xbox Elite paddles:
-          X_INPUT_GAMEPAD_Y,
-          X_INPUT_GAMEPAD_B,
-          X_INPUT_GAMEPAD_X,
-          X_INPUT_GAMEPAD_A,
-          // PS touchpad button
-          X_INPUT_GAMEPAD_GUIDE,
-      };
-  static_assert(SDL_GAMEPAD_BUTTON_SOUTH == 0);
-  static_assert(SDL_GAMEPAD_BUTTON_DPAD_RIGHT == 14);
-
   auto idx = GetControllerIndexFromInstanceID(event.gbutton.which);
   if (!idx) {
     // The pad can be removed between the event being posted and drained.
@@ -732,25 +883,59 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
   }
   auto& controller = controllers_.at(*idx);
 
-  uint16_t xbuttons = controller.state.gamepad.buttons;
-  // Lookup the XInput button code.
-  if (event.gbutton.button >= xbutton_lookup.size()) {
+  if (event.gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT) {
     // A newer SDL Version may have added new buttons.
     REXLOG_INFO("SDL HID: Unknown button was pressed: {}.", event.gbutton.button);
     return;
   }
-  auto xbutton = xbutton_lookup.at(event.gbutton.button);
-  // Pressed or released?
+  // The controller's own button; the guest's follow from gamepad_remap (the standard layout by default).
   if (event.gbutton.down) {
-    if (xbutton == X_INPUT_GAMEPAD_GUIDE && !REXCVAR_GET(guide_button)) {
-      return;
-    }
-    xbuttons |= xbutton;
+    controller.physical_buttons |= Bit(event.gbutton.button);
   } else {
-    xbuttons &= ~xbutton;
+    controller.physical_buttons &= ~Bit(event.gbutton.button);
   }
-  controller.state.gamepad.buttons = xbuttons;
+  ApplyRemap(controller);
   controller.state_changed = true;
+}
+
+void SDLInputDriver::ApplyRemap(ControllerState& state) {
+  static_assert(SDL_GAMEPAD_BUTTON_COUNT <= kInputLeftTrigger);
+  auto pressed = [&state](uint64_t sources) {
+    return (sources & state.physical_buttons) != 0 ||
+           ((sources & Bit(kInputLeftTrigger)) && state.physical_triggers[0] > HID_SDL_TRIGG_THRES) ||
+           ((sources & Bit(kInputRightTrigger)) && state.physical_triggers[1] > HID_SDL_TRIGG_THRES);
+  };
+  // An analog trigger keeps its travel; a button on a trigger pulls it all the way.
+  auto trigger = [&state](uint64_t sources) {
+    uint8_t value = 0;
+    if (sources & Bit(kInputLeftTrigger)) value = std::max(value, state.physical_triggers[0]);
+    if (sources & Bit(kInputRightTrigger)) value = std::max(value, state.physical_triggers[1]);
+    if (sources & state.physical_buttons) value = 0xFF;
+    return value;
+  };
+
+  // The D-pad is not remapped.
+  uint16_t buttons = 0;
+  constexpr std::pair<int, uint16_t> kDpad[] = {{SDL_GAMEPAD_BUTTON_DPAD_UP, X_INPUT_GAMEPAD_DPAD_UP},
+                                                {SDL_GAMEPAD_BUTTON_DPAD_DOWN, X_INPUT_GAMEPAD_DPAD_DOWN},
+                                                {SDL_GAMEPAD_BUTTON_DPAD_LEFT, X_INPUT_GAMEPAD_DPAD_LEFT},
+                                                {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, X_INPUT_GAMEPAD_DPAD_RIGHT}};
+  for (auto [input, button] : kDpad) {
+    if (state.physical_buttons & Bit(input)) {
+      buttons |= button;
+    }
+  }
+  for (int c = 0; c < kRemapControls; ++c) {
+    if (kControlButtons[c] && pressed(state.sources[c])) {
+      buttons |= kControlButtons[c];
+    }
+  }
+  if (!REXCVAR_GET(guide_button)) {
+    buttons &= ~uint16_t(X_INPUT_GAMEPAD_GUIDE);
+  }
+  state.state.gamepad.buttons = buttons;
+  state.state.gamepad.left_trigger = trigger(state.sources[kLT]);
+  state.state.gamepad.right_trigger = trigger(state.sources[kRT]);
 }
 
 std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(SDL_JoystickID instance_id) {
