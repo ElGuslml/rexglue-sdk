@@ -67,6 +67,7 @@ Features a game turns on from its own code (a `[[midasm_hook]]` that calls them)
 | # | Change |
 |---|---|
 | 34 | A quit prompt the game offers on its title screen (`rex/ui/overlay/quit_prompt.h`): B asks whether to quit, in the game's language, A quits and B cancels, and the game does not see those presses (`InputSystem::SetHostInputFilter`); `quit_prompt` turns it off |
+| 35 | The quit prompt can also be offered with a condition the game registers once, asked when a press of B begins (`SetQuitPromptCondition`), for a game whose screens change on events rather than in code that runs every frame; and its language set by the game (`SetQuitPromptLanguage`), for a game that asks for its language in its own menu |
 
 ## Working on this branch
 

@@ -84,6 +84,8 @@ struct State {
   WindowedAppContext* app_context = nullptr;
   std::function<void()> accept;
   std::atomic<int64_t> offered_at{0};  // Clock ticks of the last OfferQuitPrompt(); 0 = never
+  std::function<bool()> condition;     // SetQuitPromptCondition(): asked when a press of B begins
+  std::atomic<uint32_t> language{0};    // SetQuitPromptLanguage(); 0 = user_language
   bool open = false;                   // the dialog is open (or opening)
   bool accepted = false;               // the player confirmed: the window is closing
   std::array<uint16_t, kMaxUsers> buttons{};  // each user's buttons at the guest's last read
@@ -126,7 +128,8 @@ class QuitPromptDialog final : public ImGuiDialog {
       Cancel();
     }
 
-    const Texts& texts = TextsFor(REXCVAR_GET(user_language));
+    uint32_t language = GetState().language.load(std::memory_order_relaxed);
+    const Texts& texts = TextsFor(language ? language : REXCVAR_GET(user_language));
     // The default font is a 10-pixel bitmap font: scaled by whole steps with the screen's height, so that the
     // text is about 1/36 of it.
     float scale = std::max(1.0f, std::floor(io.DisplaySize.y / 360.0f));
@@ -281,6 +284,16 @@ void OfferQuitPrompt() {
   GetState().offered_at.store(Clock::now().time_since_epoch().count(), std::memory_order_relaxed);
 }
 
+void SetQuitPromptCondition(std::function<bool()> condition) {
+  State& state = GetState();
+  std::lock_guard lock(state.mutex);
+  state.condition = std::move(condition);
+}
+
+void SetQuitPromptLanguage(uint32_t xlanguage) {
+  GetState().language.store(xlanguage, std::memory_order_relaxed);
+}
+
 bool IsQuitPromptOpen() {
   State& state = GetState();
   std::lock_guard lock(state.mutex);
@@ -307,7 +320,8 @@ bool QuitPromptInputFilter(uint32_t user_index, const rex::input::X_INPUT_GAMEPA
     } else if (pressed & rex::input::X_INPUT_GAMEPAD_B) {
       int64_t offered_at = state.offered_at.load(std::memory_order_relaxed);
       auto since = Clock::now().time_since_epoch() - Clock::duration(offered_at);
-      if (offered_at != 0 && since < kOfferWindow && REXCVAR_GET(quit_prompt) && state.imgui_drawer) {
+      bool offered = (offered_at != 0 && since < kOfferWindow) || (state.condition && state.condition());
+      if (offered && REXCVAR_GET(quit_prompt) && state.imgui_drawer) {
         state.open = true;
         state.latched.fill(true);
         open_now = true;
