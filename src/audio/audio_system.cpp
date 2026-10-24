@@ -28,6 +28,12 @@ REXCVAR_DEFINE_INT32(
     audio_maxqframes, 8, "Audio",
     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
 
+REXCVAR_DEFINE_INT32(audio_callback_min_interval_us, 0, "Audio",
+                     "Minimum time between two calls of a client's render callback, in microseconds "
+                     "(0 = as soon as a frame is free). The console calls it every 5333 us; the host "
+                     "device frees frames in bursts")
+    .range(0, 5000);
+
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
 // decoders. Later games use XAudio*() and direct memory writes to the XMA
@@ -145,9 +151,11 @@ void AudioSystem::WorkerThreadMain() {
                        client_callback, client_callback_arg, index);
         }
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
+        PaceClientCallback(index);
         uint64_t args[] = {client_callback_arg};
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
+        last_callback_[index] = std::chrono::steady_clock::now();
         if (diag_pump_count < 10) {
           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
         }
@@ -171,6 +179,27 @@ void AudioSystem::WorkerThreadMain() {
   worker_running_ = false;
 
   // TODO(benvanik): call module API to kill?
+}
+
+// The console's render driver calls each client once per frame of 256 samples, every 5333 us. Here a
+// client is called when the host device has played one of its queued frames, and the device takes
+// them in bursts: two at a time on a 10 ms WASAPI period, so two calls 0.1 ms apart and then none for
+// 10 ms. A game that polls how far the render driver has read, instead of counting the calls, misses
+// the frames in between: an FMOD output that mixes into a ring of two 256-sample blocks, and mixes a
+// block when the read position it polls every millisecond has moved to the other block, sees the
+// position come back to the same block and mixes one block in a dozen, while the rest of the time the
+// stale ring is played again (a buzz instead of music). Spacing the calls keeps the average rate,
+// which the frames the device frees still decide, and gives the game's poll every block.
+void AudioSystem::PaceClientCallback(size_t index) {
+  const int32_t interval_us = REXCVAR_GET(audio_callback_min_interval_us);
+  if (interval_us <= 0) {
+    return;
+  }
+  const auto due = last_callback_[index] + std::chrono::microseconds(interval_us);
+  const auto now = std::chrono::steady_clock::now();
+  if (now < due) {
+    rex::thread::PreciseSleep(std::chrono::duration_cast<std::chrono::microseconds>(due - now));
+  }
 }
 
 int AudioSystem::FindFreeClient() {

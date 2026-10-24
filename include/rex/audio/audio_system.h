@@ -12,6 +12,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <queue>
 
 #include <rex/kernel.h>
@@ -61,6 +62,7 @@ class AudioSystem : public system::IAudioSystem {
   virtual void Initialize();
 
   void WorkerThreadMain();
+  void PaceClientCallback(size_t index);
 
   virtual X_STATUS CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
                                 AudioDriver** out_driver) = 0;
@@ -87,6 +89,9 @@ class AudioSystem : public system::IAudioSystem {
   } clients_[kMaximumClientCount];
 
   int FindFreeClient();
+
+  // When each client's callback last returned (audio_callback_min_interval_us).
+  std::chrono::steady_clock::time_point last_callback_[kMaximumClientCount] = {};
 
   std::unique_ptr<rex::thread::Semaphore> client_semaphores_[kMaximumClientCount];
   // Event is always there in case we have no clients.

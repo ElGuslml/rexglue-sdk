@@ -8,6 +8,7 @@ Gustavo Garcia's recompilation projects need, one commit each. The games use it 
 - KameoRecomp (Kameo: Elements of Power)
 - GRAWRecomp (Ghost Recon Advanced Warfighter)
 - POTCAWERecompVulkan (Pirates of the Caribbean: At World's End)
+- GHMetalRecomp (Guitar Hero: Metallica)
 
 and their renderer, [NativeXRenderer](https://github.com/ElGuslml/NativeXRenderer), which hooks a game's Direct3D
 calls and draws on the host instead of emulating the Xbox 360 GPU.
@@ -57,6 +58,7 @@ None of them is specific to one game; the options they add are off by default.
 | 36 | `gamepad_remap`: a controller's buttons and triggers moved to other Xbox 360 controls, per SDL gamepad type (`ps5:a=east,b=south`; `*` for any), applied by the SDL driver; empty keeps the standard layout. The games' launchers edit it |
 | 37 | Dear ImGui's textures made on request (`ImGuiBackendFlags_RendererHasTextures`): fonts are rasterized at any size they are drawn at, and a renderer that draws the dialogs with its own immediate drawer gets the font atlas made with it. Barlow (SIL OFL 1.1, `resources/fonts`) embedded for the SDK's dialogs, a common dialog style (`DialogStyle`, scaled with the screen's height) and language (`SetOverlayLanguage`), and the quit prompt drawn in them |
 | 38 | Achievements: the toast is a card at the top center (the icon, "ACHIEVEMENT UNLOCKED" in the dialogs' language, the name and description, the gamerscore, a bar for the time left) and the F7 list a panel with the totals, the progress and each achievement's unlock date, in the dialogs' style; texts in the dialogs' language from the title's XDBF; icons made with the ImGuiDrawer's current immediate drawer (a renderer that draws the dialogs itself shows them); the F7 list no longer asks for continuous painting. A cache for launchers next to the unlocks (`<TITLEID>.info.toml` with every language, the icons as PNG), and `achievements_cache_only`, which writes it and quits |
+| 39 | `audio_callback_min_interval_us`: a client's render callback is called at least that many microseconds after its last call returned, instead of twice in a row when the host device takes two frames at once (WASAPI's 10 ms period); the console calls it every 5333 us. Games that poll the render position miss the frames of a burst (Guitar Hero: Metallica's FMOD mixed one block in a dozen and played noise); 0 keeps the calls as soon as a frame is free |
 
 ## For NativeXRenderer
 
