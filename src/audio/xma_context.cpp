@@ -304,21 +304,39 @@ const uint8_t* XmaContext::GetNextPacket(XMA_CONTEXT_DATA* data, uint32_t next_p
     return nullptr;
   }
 
-  return memory()->TranslatePhysical(next_buffer_address);
+  // In a multichannel file each stream's packets are interleaved with the other streams' ones, and a
+  // packet's skip count is how many packets of the others follow it. A skip that runs past the end of
+  // this buffer continues into the next one: the stream's next packet is that many packets into it,
+  // not its first packet (which belongs to another stream when several contexts share the buffers).
+  const uint32_t packets_into_next = next_packet_index - current_input_packet_count;
+  if (packets_into_next >= data->GetInputBufferPacketCount(next_buffer_index)) {
+    return nullptr;
+  }
+  return memory()->TranslatePhysical(next_buffer_address) + packets_into_next * kBytesPerPacket;
 }
 
 uint32_t XmaContext::GetNextPacketReadOffset(uint8_t* buffer, uint32_t next_packet_index,
-                                             uint32_t current_input_packet_count) {
+                                             uint32_t current_input_packet_count,
+                                             uint32_t* packets_past_end) {
   while (next_packet_index < current_input_packet_count) {
     uint8_t* next_packet = buffer + (next_packet_index * kBytesPerPacket);
     const uint32_t packet_frame_offset = xma::GetPacketFrameOffset(next_packet);
 
     if (packet_frame_offset <= kMaxFrameSizeinBits) {
+      if (packets_past_end) {
+        *packets_past_end = 0;
+      }
       return (next_packet_index * kBitsPerPacket) + packet_frame_offset;
     }
-    next_packet_index++;
+    // No frame starts in this packet: the stream continues after the other streams' packets.
+    const uint8_t skip_count = xma::GetPacketSkipCount(next_packet);
+    next_packet_index += (skip_count == 0xFF ? 0 : skip_count) + 1;
   }
 
+  // The stream's next packet is in the next buffer, this many packets into it (see GetNextPacket).
+  if (packets_past_end) {
+    *packets_past_end = next_packet_index - current_input_packet_count;
+  }
   return kBitsPerPacketHeader;
 }
 
@@ -722,19 +740,25 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
     return;
   }
 
-  uint32_t next_input_offset =
-      GetNextPacketReadOffset(current_input_buffer, next_packet_index, current_input_packet_count);
+  uint32_t packets_past_end = 0;
+  uint32_t next_input_offset = GetNextPacketReadOffset(
+      current_input_buffer, next_packet_index, current_input_packet_count, &packets_past_end);
 
   if (next_input_offset == kBitsPerPacketHeader) {
     SwapInputBuffer(data);
     if (data->IsAnyInputBufferValid()) {
-      next_input_offset = xma::GetPacketFrameOffset(
-          memory()->TranslatePhysical(data->GetCurrentInputBufferAddress()));
+      // The stream goes on that many packets into the new buffer (see GetNextPacket).
+      const uint32_t first_packet =
+          packets_past_end < data->GetCurrentInputBufferPacketCount() ? packets_past_end : 0;
+      const uint32_t frame_offset = xma::GetPacketFrameOffset(
+          memory()->TranslatePhysical(data->GetCurrentInputBufferAddress()) +
+          first_packet * kBytesPerPacket);
 
-      if (next_input_offset > kMaxFrameSizeinBits) {
+      if (frame_offset > kMaxFrameSizeinBits) {
         SwapInputBuffer(data);
         return;
       }
+      next_input_offset = first_packet * kBitsPerPacket + frame_offset;
     }
   }
   data->input_buffer_read_offset = next_input_offset;
