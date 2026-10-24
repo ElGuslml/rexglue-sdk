@@ -35,6 +35,7 @@ struct PPCCodegenFlags {
   bool cr_as_local = false;
   bool non_argument_as_local = false;
   bool non_volatile_as_local = false;
+  bool non_volatile_vectors_as_local = true;
 };
 
 /// PPC image layout passed from the generated config header into ReXApp.

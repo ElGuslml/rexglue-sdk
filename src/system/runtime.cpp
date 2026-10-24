@@ -249,9 +249,10 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
   const auto& flags = image_info.codegen_flags;
   REXSYS_DEBUG(
       "Codegen config: skip_lr={} skip_msr={} ctr={} xer={} cr={} reserved={} "
-      "non_argument={} non_volatile={}",
+      "non_argument={} non_volatile={} non_volatile_vectors={}",
       flags.skip_lr, flags.skip_msr, flags.ctr_as_local, flags.xer_as_local, flags.cr_as_local,
-      flags.reserved_as_local, flags.non_argument_as_local, flags.non_volatile_as_local);
+      flags.reserved_as_local, flags.non_argument_as_local, flags.non_volatile_as_local,
+      flags.non_volatile_vectors_as_local);
 
   return X_STATUS_SUCCESS;
 }

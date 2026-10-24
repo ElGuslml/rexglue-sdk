@@ -96,6 +96,9 @@ struct RecompilerConfig {
   bool crRegistersAsLocalVariables = false;
   bool nonArgumentRegistersAsLocalVariables = false;
   bool nonVolatileRegistersAsLocalVariables = false;
+  /// With nonVolatileRegistersAsLocalVariables: the non-volatile vector registers (v14-v31, v64-v127)
+  /// too. False keeps them in ctx, for code that passes values to its callees in them.
+  bool nonVolatileVectorsAsLocalVariables = true;
   bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
 
   // === Analysis tuning (optional) ===

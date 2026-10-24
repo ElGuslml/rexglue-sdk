@@ -114,6 +114,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
             hasBool("non_argument_as_local"), "non_argument_as_local");
   MergeBool(cfg.nonVolatileRegistersAsLocalVariables, toml["non_volatile_as_local"].value_or(false),
             hasBool("non_volatile_as_local"), "non_volatile_as_local");
+  MergeBool(cfg.nonVolatileVectorsAsLocalVariables,
+            toml["non_volatile_vectors_as_local"].value_or(true),
+            hasBool("non_volatile_vectors_as_local"), "non_volatile_vectors_as_local");
   MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
             hasBool("generate_exception_handlers"), "generate_exception_handlers");
   if (hasBool("is_dll")) {

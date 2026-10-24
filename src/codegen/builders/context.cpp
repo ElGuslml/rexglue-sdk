@@ -72,7 +72,8 @@ std::string BuilderContext::f(size_t index) {
 std::string BuilderContext::v(size_t index) {
   const auto& cfg = config();
   if ((cfg.nonArgumentRegistersAsLocalVariables && (index >= 32 && index <= 63)) ||
-      (localizeNonVolatiles() && ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)))) {
+      (localizeNonVolatiles() && cfg.nonVolatileVectorsAsLocalVariables &&
+       ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)))) {
     locals.v[index] = true;
     return fmt::format("v{}", index);
   }
@@ -258,7 +259,11 @@ void BuilderContext::emit_function_call(uint32_t address) {
       // below): it gets the helpers' work done on ctx in place.
       if (cfg.nonVolatileRegistersAsLocalVariables &&
           (name.find("__rest") == 0 || name.find("__save") == 0)) {
-        if (fn.sharesRegisters()) {
+        // Vector registers kept in ctx (non_volatile_vectors_as_local = false): their helpers still
+        // save and restore them, on ctx, for the caller.
+        bool vectorsInCtx = !cfg.nonVolatileVectorsAsLocalVariables &&
+                            name.find("vmx_") != std::string_view::npos;
+        if (fn.sharesRegisters() || vectorsInCtx) {
           emit_shared_register_helper(name);
           return;
         }

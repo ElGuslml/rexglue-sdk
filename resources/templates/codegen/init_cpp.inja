@@ -26,6 +26,7 @@ const rex::PPCImageInfo PPCImageConfig = {
         .cr_as_local = {{ config_flags.cr_as_local }},
         .non_argument_as_local = {{ config_flags.non_argument_as_local }},
         .non_volatile_as_local = {{ config_flags.non_volatile_as_local }},
+        .non_volatile_vectors_as_local = {{ config_flags.non_volatile_vectors_as_local }},
     },
 };
 
