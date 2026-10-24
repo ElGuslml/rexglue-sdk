@@ -39,6 +39,11 @@ REXCVAR_DEFINE_DOUBLE(left_stick_deadzone_percentage, 0.0, "Input",
 REXCVAR_DEFINE_DOUBLE(right_stick_deadzone_percentage, 0.0, "Input",
                       "Deadzone applied to the right stick, as a fraction of its range")
     .range(0.0, 1.0);
+REXCVAR_DEFINE_INT32(gamepad_subtype, 0, "Input",
+                     "XINPUT_DEVSUBTYPE reported for a plain gamepad (and the keyboard's emulated pad): "
+                     "0 = gamepad, 6 = guitar, 7 = alternate guitar, 8 = drum kit, 11 = bass guitar. "
+                     "Devices of another kind (a real guitar) keep their own")
+    .range(0, 0x13);
 namespace rex::input {
 
 namespace {
@@ -229,7 +234,16 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   if (!driver) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+  X_RESULT result = driver->GetDeviceCapabilities(chosen, flags, out_caps);
+  // A music game asks for the kind of controller and gives a plain gamepad another part (Guitar Hero's
+  // band games make it the singer, who needs a microphone). Reported as a guitar or a drum kit, the pad
+  // plays that part with the same XInput controls those instruments use (frets on A, B, Y, X and LB,
+  // strumming on the D-pad, the whammy bar on the right stick).
+  const int32_t subtype = REXCVAR_GET(gamepad_subtype);
+  if (result == X_ERROR_SUCCESS && subtype != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
+    out_caps->sub_type = static_cast<uint8_t>(subtype);
+  }
+  return result;
 }
 
 void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
