@@ -37,6 +37,7 @@
 #include <rex/system/achievement_manager.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xam/content_manager.h>
 #include <rex/system/xthread.h>
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/keybinds.h>
@@ -52,6 +53,12 @@
 REXCVAR_DEFINE_BOOL(achievements_cache_only, false, "UI",
                     "Write the title's achievements for a launcher (the user data's achievements folder: "
                     "<TITLEID>.info.toml and the icons) and quit without starting the game")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_STRING(install_content, "", "UI",
+                      "Install an Xbox 360 content package (an STFS file: LIVE, PIRS or CON) as this "
+                      "title's downloadable content, extracted into the user data's content folder, "
+                      "and quit without starting the game")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
@@ -94,6 +101,38 @@ void WriteAchievementCacheOnly(const PathConfig& paths) {
               (paths.user_data_root / "achievements").string());
 }
 
+// --install_content=<package>: as above, the executable loaded in tool mode for its title ID, then the
+// package extracted as the title's downloadable content (ContentManager::InstallContent:
+// <user data>/0000000000000000/<title ID>/00000002/<package's file name>/, and its .header, written last).
+// The package's own title ID is not checked: a game may read the DLC of another (Guitar Hero: Metallica,
+// Guitar Hero III's "Death Magnetic").
+bool InstallContentOnly(const PathConfig& paths, const std::filesystem::path& package) {
+  if (paths.game_data_root.empty() || paths.user_data_root.empty()) {
+    REXLOG_ERROR("install_content: the game data or user data folder is not set");
+    return false;
+  }
+  auto runtime = std::make_unique<rex::Runtime>(paths.game_data_root, paths.user_data_root, paths.update_data_root,
+                                                paths.cache_root, paths.metadata_root);
+  auto status = runtime->Setup(rex::RuntimeConfig{.kernel_init = rex::kernel::InitializeKernel, .tool_mode = true});
+  if (XFAILED(status)) {
+    REXLOG_ERROR("install_content: runtime setup failed: {:08X}", status);
+    return false;
+  }
+  status = runtime->LoadXexImage("game:\\default.xex");
+  if (XFAILED(status)) {
+    REXLOG_ERROR("install_content: failed to load the executable: {:08X}", status);
+    return false;
+  }
+  auto result = runtime->kernel_state()->content_manager()->InstallContent(package);
+  if (result != X_ERROR_SUCCESS) {
+    REXLOG_ERROR("install_content: {} not installed: {:08X}", rex::path_to_utf8(package), result);
+    return false;
+  }
+  REXLOG_INFO("install_content: {} installed for title {:08X} in {}", rex::path_to_utf8(package),
+              runtime->kernel_state()->title_id(), rex::path_to_utf8(paths.user_data_root));
+  return true;
+}
+
 }  // namespace
 
 // --- ReXApp ---
@@ -131,6 +170,11 @@ bool ReXApp::OnInitialize() {
     return false;
   if (REXCVAR_GET(achievements_cache_only)) {
     WriteAchievementCacheOnly(resolved_defaults_);
+    app_context().RequestDeferredQuit();
+    return true;
+  }
+  if (!REXCVAR_GET(install_content).empty()) {
+    InstallContentOnly(resolved_defaults_, rex::to_path(REXCVAR_GET(install_content)));
     app_context().RequestDeferredQuit();
     return true;
   }
