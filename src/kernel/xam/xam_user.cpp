@@ -30,6 +30,10 @@
 #include <rex/system/xtypes.h>
 
 REXCVAR_DEFINE_UINT32(user_language, 1, "Kernel", "User's language ID");
+REXCVAR_DEFINE_BOOL(signin_ui_cancel, false, "Kernel",
+                    "XamShowSigninUI acts as the system's sign-in UI closed without signing anyone "
+                    "in (XN_SYS_UI on, then off), as when the player cancels it on the console, "
+                    "instead of reporting a sign-in change of user 0");
 
 namespace rex {
 namespace kernel {
@@ -495,6 +499,19 @@ u32 XamUserAreUsersFriends_entry(u32 user_index, u32 unk1, u32 unk2, mapped_u32 
 }
 
 u32 XamShowSigninUI_entry(u32 unk, u32 unk_mask) {
+  // Only user 0 has a profile, and no sign-in UI is shown: with signin_ui_cancel the UI opens
+  // and closes as when the player cancels it. A game that asks a controller without a profile to
+  // sign in then goes on as on the console (Guitar Hero: Metallica, Start pressed on a second
+  // controller: its "not signed in" message, with "continue without saving"); with the sign-in
+  // change below it waited for that controller's sign-in forever.
+  if (REXCVAR_GET(signin_ui_cancel)) {
+    REXKRNL_INFO("XamShowSigninUI({}, {:#x}): closed without a sign-in (signin_ui_cancel)",
+                 uint32_t(unk), uint32_t(unk_mask));
+    REX_KERNEL_STATE()->BroadcastNotification(0x00000009, 1);  // XN_SYS_UI (on)
+    REX_KERNEL_STATE()->BroadcastNotification(0x00000009, 0);  // XN_SYS_UI (off)
+    return X_ERROR_SUCCESS;
+  }
+
   // Mask values vary. Probably matching user types? Local/remote?
 
   // To fix game modes that display a 4 profile signin UI (even if playing
