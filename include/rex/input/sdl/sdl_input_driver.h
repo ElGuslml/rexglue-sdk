@@ -78,6 +78,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     // For each remappable control, the physical inputs that press it (SDL_GamepadButton bits; bits 32 and 33
     // are the left and right triggers).
     std::array<uint64_t, kRemapControls> sources;
+    // A guitar whose whammy bar (the right stick's X axis, -32768 at rest) has not reported a position yet: an Xbox
+    // 360 guitar reads 0 there, half pressed, until the bar first moves. Until then the bar is at rest.
+    bool whammy_unknown;
   };
 
   // WindowListener

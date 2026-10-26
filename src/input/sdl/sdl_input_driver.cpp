@@ -801,6 +801,10 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
                 SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
   }
   UpdateXCapabilities(state);
+  if (joy_type == SDL_JOYSTICK_TYPE_GUITAR) {
+    state.whammy_unknown = true;
+    state.state.gamepad.thumb_rx = INT16_MIN;
+  }
   controllers_.push_back(state);
 
   const int ordinal = static_cast<int>(controllers_.size()) - 1;
@@ -854,6 +858,14 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
       pad.thumb_ly = ~event.gaxis.value;
       break;
     case SDL_GAMEPAD_AXIS_RIGHTX:
+      if (controller.whammy_unknown) {
+        if (event.gaxis.value == 0) {
+          break;
+        }
+        controller.whammy_unknown = false;
+        REXLOG_INFO("SDL: device {}'s whammy bar reported its first position, {}.",
+                    static_cast<uint64_t>(controller.id), event.gaxis.value);
+      }
       pad.thumb_rx = event.gaxis.value;
       break;
     case SDL_GAMEPAD_AXIS_RIGHTY:
