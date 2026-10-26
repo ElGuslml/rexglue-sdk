@@ -79,7 +79,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     // are the left and right triggers).
     std::array<uint64_t, kRemapControls> sources;
     // A guitar whose whammy bar (the right stick's X axis, -32768 at rest) has not reported a position yet: an Xbox
-    // 360 guitar reads 0 there, half pressed, until the bar first moves. Until then the bar is at rest.
+    // 360 guitar reads 0 there, half pressed, until the bar first moves. Until then the bar is at rest (with
+    // guitar_whammy_rest).
     bool whammy_unknown;
   };
 

@@ -34,6 +34,11 @@ REXCVAR_DEFINE_STRING(gamepad_remap, "", "Input",
                       "guide; input is the controller's south east west north lb rb lt rt ls rs start back guide "
                       "dpup dpdown dpleft dpright misc1-6 paddle1-4 touchpad, alternatives joined by '|'. Empty: "
                       "the standard layout. Example: 'ps5:a=east,b=south'");
+REXCVAR_DEFINE_BOOL(
+    guitar_whammy_rest, false, "Input",
+    "A guitar's whammy bar (the right stick's X axis) is at rest, -32768, until the guitar "
+    "reports a position: an Xbox 360 guitar reads 0 there, half pressed, until the bar first "
+    "moves. For a game that plays guitars; in another the bar at rest is the stick held left");
 
 namespace rex::input::sdl {
 
@@ -801,7 +806,7 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
                 SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
   }
   UpdateXCapabilities(state);
-  if (joy_type == SDL_JOYSTICK_TYPE_GUITAR) {
+  if (joy_type == SDL_JOYSTICK_TYPE_GUITAR && REXCVAR_GET(guitar_whammy_rest)) {
     state.whammy_unknown = true;
     state.state.gamepad.thumb_rx = INT16_MIN;
   }
