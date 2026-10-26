@@ -15,12 +15,18 @@
 #include <rex/ui/window_listener.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <queue>
 #include <string>
 
 namespace rex::input::mnk {
+
+/// mnk_tap_target only while `gate` returns true, a state of the game's own (Guitar Hero: in a
+/// song, as its menus move their cursor with the D-pad it strums with); null, the default: always.
+/// The gate runs on the thread that reads the pad, at each read.
+void SetTapGate(bool (*gate)());
 
 void SetMouseLookActive(bool active);
 bool IsMouseLookActive();
@@ -70,6 +76,10 @@ class MnkInputDriver final : public InputDriver,
   /// keystroke for each pad button that changed. Call with state_mutex_ held
   /// after any key or mouse button moves.
   void RefreshBoundKeystrokesLocked();
+  /// mnk_tap_target: presses the target control briefly when one of mnk_tap_sources is pressed, the
+  /// sources pressed within mnk_tap_window_ms making one press. Takes and returns the pad's
+  /// buttons; call with state_mutex_ held, once per evaluation of the state.
+  uint16_t ApplyTapLocked(uint16_t buttons);
 
   // Called from the guest thread. The rest of the capture path stays on the UI
   // thread, since every Window call in it reaches SDL.
@@ -118,6 +128,18 @@ class MnkInputDriver final : public InputDriver,
 
   // Packet number incremented on state change
   uint32_t packet_number_ = 0;
+
+  // mnk_tap_target (guest thread, state_mutex_ held): the sources pressed at the last evaluation,
+  // the ones pressed for the coming press of the target and for the current one (held with it, so
+  // that a quick tap still reaches the game), and when the coming press began, when the current one
+  // ends and when the next may start.
+  uint16_t tap_previous_ = 0;
+  uint16_t tap_pending_mask_ = 0;
+  uint16_t tap_active_mask_ = 0;
+  bool tap_pending_ = false;
+  std::chrono::steady_clock::time_point tap_first_{};
+  std::chrono::steady_clock::time_point tap_until_{};
+  std::chrono::steady_clock::time_point tap_ready_{};
 };
 
 }  // namespace rex::input::mnk

@@ -18,6 +18,7 @@
 #include <rex/ui/window.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +58,23 @@ REXCVAR_DEFINE_STRING(keybind_dpad_right, "Shift+Right", "Input/Keybinds/Control
 REXCVAR_DEFINE_STRING(keybind_back, "Z,Tab", "Input/Keybinds/Controller", "Back button");
 REXCVAR_DEFINE_STRING(keybind_start, "X,Return", "Input/Keybinds/Controller", "Start button");
 REXCVAR_DEFINE_STRING(keybind_guide, "", "Input/Keybinds/Controller", "Guide button");
+
+REXCVAR_DEFINE_STRING(
+    mnk_tap_target, "", "Input",
+    "A control the keyboard's pad also presses, briefly, when one of mnk_tap_sources is "
+    "pressed (a, b, x, y, lb, rb, back, start, ls, rs, dpad_up, dpad_down, dpad_left, "
+    "dpad_right): a music game's strum on each fret. Empty: off");
+REXCVAR_DEFINE_STRING(
+    mnk_tap_sources, "", "Input",
+    "The controls whose press presses mnk_tap_target, comma-separated (a,b,y,x,lb)");
+REXCVAR_DEFINE_INT32(
+    mnk_tap_window_ms, 20, "Input",
+    "Presses of mnk_tap_sources within this many milliseconds of the first are one press of "
+    "mnk_tap_target (a chord, one strum), which comes when the window ends");
+REXCVAR_DEFINE_INT32(
+    mnk_tap_hold_ms, 30, "Input",
+    "How long mnk_tap_target stays pressed; it then stays released at least 20 ms, so "
+    "that a game reading the pad once a frame sees each press");
 
 REXCVAR_DEFINE_BOOL(mnk_passthrough, false, "Input",
                     "Surface raw keystrokes to the title instead of emulating a pad, for "
@@ -424,6 +442,115 @@ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
+namespace {
+
+std::atomic<bool (*)()> g_tap_gate{nullptr};
+
+}  // namespace
+
+void SetTapGate(bool (*gate)()) {
+  g_tap_gate.store(gate, std::memory_order_release);
+}
+
+namespace {
+
+// A comma-separated list of the pad's controls (mnk_tap_target, mnk_tap_sources) as XINPUT_GAMEPAD
+// button bits.
+uint16_t ControlBits(std::string_view list) {
+  struct Name {
+    std::string_view name;
+    uint16_t bit;
+  };
+  static constexpr Name kNames[] = {
+      {"a", X_INPUT_GAMEPAD_A},
+      {"b", X_INPUT_GAMEPAD_B},
+      {"x", X_INPUT_GAMEPAD_X},
+      {"y", X_INPUT_GAMEPAD_Y},
+      {"lb", X_INPUT_GAMEPAD_LEFT_SHOULDER},
+      {"rb", X_INPUT_GAMEPAD_RIGHT_SHOULDER},
+      {"back", X_INPUT_GAMEPAD_BACK},
+      {"start", X_INPUT_GAMEPAD_START},
+      {"ls", X_INPUT_GAMEPAD_LEFT_THUMB},
+      {"rs", X_INPUT_GAMEPAD_RIGHT_THUMB},
+      {"dpad_up", X_INPUT_GAMEPAD_DPAD_UP},
+      {"dpad_down", X_INPUT_GAMEPAD_DPAD_DOWN},
+      {"dpad_left", X_INPUT_GAMEPAD_DPAD_LEFT},
+      {"dpad_right", X_INPUT_GAMEPAD_DPAD_RIGHT},
+  };
+  uint16_t bits = 0;
+  while (!list.empty()) {
+    size_t comma = list.find(',');
+    std::string_view name = list.substr(0, comma);
+    while (!name.empty() && name.front() == ' ')
+      name.remove_prefix(1);
+    while (!name.empty() && name.back() == ' ')
+      name.remove_suffix(1);
+    for (const Name& n : kNames) {
+      if (name.size() == n.name.size() &&
+          std::equal(name.begin(), name.end(), n.name.begin(), [](char a, char b) {
+            return std::tolower(static_cast<unsigned char>(a)) == b;
+          })) {
+        bits |= n.bit;
+      }
+    }
+    if (comma == std::string_view::npos)
+      break;
+    list.remove_prefix(comma + 1);
+  }
+  return bits;
+}
+
+}  // namespace
+
+uint16_t MnkInputDriver::ApplyTapLocked(uint16_t buttons) {
+  uint16_t target = ControlBits(REXCVAR_GET(mnk_tap_target));
+  uint16_t sources = ControlBits(REXCVAR_GET(mnk_tap_sources)) & ~target;
+  if (!target || !sources) {
+    tap_previous_ = tap_pending_mask_ = tap_active_mask_ = 0;
+    tap_pending_ = false;
+    return buttons;
+  }
+  // The game's gate closed: no press is a tap, and the sources held are not new when it opens.
+  bool (*gate)() = g_tap_gate.load(std::memory_order_acquire);
+  if (gate && !gate()) {
+    tap_previous_ = buttons & sources;
+    tap_pending_mask_ = tap_active_mask_ = 0;
+    tap_pending_ = false;
+    return buttons;
+  }
+  using Clock = std::chrono::steady_clock;
+  // The target released between two presses: a game that reads the pad once a frame (16.7 ms at 60
+  // FPS) sees it.
+  constexpr auto kReleased = std::chrono::milliseconds(20);
+  auto now = Clock::now();
+  uint16_t pressed = buttons & sources;
+  uint16_t newly = pressed & ~tap_previous_;
+  tap_previous_ = pressed;
+  // A source pressed: the first opens the window in which the others join the same press (a chord
+  // pressed a few milliseconds apart).
+  if (newly) {
+    if (!tap_pending_) {
+      tap_pending_ = true;
+      tap_first_ = now;
+      tap_pending_mask_ = 0;
+    }
+    tap_pending_mask_ |= newly;
+  }
+  auto window = std::chrono::milliseconds(std::max(0, REXCVAR_GET(mnk_tap_window_ms)));
+  if (tap_pending_ && now - tap_first_ >= window && now >= tap_ready_) {
+    tap_pending_ = false;
+    tap_active_mask_ = tap_pending_mask_;
+    tap_until_ = now + std::chrono::milliseconds(std::max(1, REXCVAR_GET(mnk_tap_hold_ms)));
+    tap_ready_ = tap_until_ + kReleased;
+  }
+  // While the target is pressed, the sources of its press stay pressed too: a key tapped and
+  // released within the window still reaches the game with its strum.
+  if (now < tap_until_) {
+    buttons |= target | tap_active_mask_;
+  }
+  return buttons;
+}
+
 X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -522,6 +649,8 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   auto clamp16 = [](int32_t v) -> int16_t {
     return static_cast<int16_t>(std::clamp(v, (int32_t)INT16_MIN, (int32_t)INT16_MAX));
   };
+
+  buttons = ApplyTapLocked(buttons);
 
   packet_number_++;
 
