@@ -15,6 +15,7 @@
 #include <string_view>
 
 #include <fmt/format.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 
 namespace rex::system {
@@ -70,14 +71,14 @@ bool WriteIfChanged(const std::filesystem::path& path, const void* data, size_t 
   {
     std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
     if (!file || !file.write(static_cast<const char*>(data), std::streamsize(size))) {
-      REXSYS_WARN("Achievement cache: cannot write {}", temporary.string());
+      REXSYS_WARN("Achievement cache: cannot write {}", rex::path_to_utf8(temporary));
       return false;
     }
   }
   std::error_code ec;
   std::filesystem::rename(temporary, path, ec);
   if (ec) {
-    REXSYS_WARN("Achievement cache: cannot replace {}: {}", path.string(), ec.message());
+    REXSYS_WARN("Achievement cache: cannot replace {}: {}", rex::path_to_utf8(path), ec.message());
     std::filesystem::remove(temporary, ec);
     return false;
   }
@@ -96,7 +97,7 @@ void WriteAchievementCache(const util::XdbfGameData& db, uint32_t title_id, XLan
   const std::filesystem::path icon_dir = dir / title_hex;
   std::filesystem::create_directories(icon_dir, ec);
   if (ec) {
-    REXSYS_WARN("Achievement cache: cannot create {}: {}", icon_dir.string(), ec.message());
+    REXSYS_WARN("Achievement cache: cannot create {}: {}", rex::path_to_utf8(icon_dir), ec.message());
     return;
   }
 
@@ -200,7 +201,7 @@ void WriteAchievementCache(const util::XdbfGameData& db, uint32_t title_id, XLan
   bool unchanged = SameContent(info_path, content.data(), content.size());
   if (!unchanged && WriteIfChanged(info_path, content.data(), content.size())) {
     REXSYS_INFO("Achievement cache: {} achievements, {} icons, {} languages in {}", achievements.size(),
-                icons_written.size(), languages.size(), dir.string());
+                icons_written.size(), languages.size(), rex::path_to_utf8(dir));
   }
 }
 
