@@ -141,7 +141,11 @@ class ContentPackage {
 
 class ContentManager {
  public:
-  ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path);
+  // `profile_root`, when not empty, holds the signed-in profile's content (that of a XUID other
+  // than 0: saves) and its settings in each game; the content of XUID 0 (downloadable content)
+  // stays under `root_path`.
+  ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path,
+                 const std::filesystem::path& profile_root = {});
   ~ContentManager();
 
   std::vector<XCONTENT_AGGREGATE_DATA> ListContent(uint32_t device_id, uint64_t xuid,
@@ -196,8 +200,12 @@ class ContentManager {
   ContentPackage* DetachPackage(std::unordered_map<string::string_key_case, ContentPackage*,
                                                    string::string_key_case::Hash>::iterator it);
 
+  // The folder of a XUID's content: the profile's for a user (profile_root), root_path_ otherwise.
+  const std::filesystem::path& RootFor(uint64_t xuid) const;
+
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
+  std::filesystem::path profile_root_;
 
   // TODO(benvanik): remove use of global lock, it's bad here!
   rex::thread::global_critical_region global_critical_region_;

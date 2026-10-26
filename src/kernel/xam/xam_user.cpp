@@ -30,6 +30,13 @@
 #include <rex/system/xtypes.h>
 
 REXCVAR_DEFINE_UINT32(user_language, 1, "Kernel", "User's language ID");
+REXCVAR_DEFINE_STRING(
+    profile_root, "", "Kernel",
+    "The signed-in profile's folder: its saves, its settings in each game and its "
+    "achievements. Empty: the user data folder, as before");
+REXCVAR_DEFINE_STRING(profile_name, "", "Kernel",
+                      "The signed-in profile's name (UTF-8); the game gets it in ASCII, accents "
+                      "folded, at most 15 characters. Empty: User");
 REXCVAR_DEFINE_BOOL(signin_ui_cancel, false, "Kernel",
                     "XamShowSigninUI acts as the system's sign-in UI closed without signing anyone "
                     "in (XN_SYS_UI on, then off), as when the player cancels it on the console, "

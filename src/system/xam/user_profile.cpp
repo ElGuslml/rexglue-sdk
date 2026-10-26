@@ -10,10 +10,13 @@
  */
 
 #include <sstream>
+#include <string>
+#include <utility>
 
 #include <fmt/format.h>
 
 #include <rex/logging.h>
+#include <rex/system/flags.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
 
@@ -21,12 +24,76 @@ namespace rex {
 namespace system {
 namespace xam {
 
+namespace {
+
+// A profile name for the game (profile_name): ASCII, as an Xbox 360 gamertag and as XamUserGetName
+// copies it, at most 15 characters. Latin letters with accents (U+00C0 to U+017F) lose them; other
+// characters are left out.
+std::string GamerName(const std::string& utf8) {
+  // U+00C0 to U+017F without their accents, 32 a line; '?' where it takes two letters (kTwo) or
+  // none (the signs x and /).
+  static constexpr char kFolded[] =
+      "AAAAAA?CEEEEIIIIDNOOOOO?OUUUUY??"
+      "aaaaaa?ceeeeiiiidnooooo?ouuuuy?y"
+      "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGg"
+      "GgGgHhHhIiIiIiIiIi??JjKkkLlLlLlL"
+      "lLlNnNnNnnNnOoOoOo??RrRrRrSsSsSs"
+      "SsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
+  static_assert(sizeof(kFolded) - 1 == 0x180 - 0xC0);
+  static constexpr std::pair<uint32_t, const char*> kTwo[] = {
+      {0xC6, "AE"},  {0xDE, "Th"},  {0xDF, "ss"},  {0xE6, "ae"}, {0xFE, "th"},
+      {0x132, "IJ"}, {0x133, "ij"}, {0x152, "OE"}, {0x153, "oe"}};
+  std::string name;
+  for (size_t i = 0; i < utf8.size();) {
+    // The next character's code point.
+    uint32_t c = uint8_t(utf8[i]);
+    size_t length = c < 0x80           ? 1
+                    : (c >> 5) == 0x6  ? 2
+                    : (c >> 4) == 0xE  ? 3
+                    : (c >> 3) == 0x1E ? 4
+                                       : 1;
+    if (length > 1) {
+      c &= 0x7F >> length;
+      for (size_t k = 1; k < length && i + k < utf8.size(); ++k) {
+        c = (c << 6) | (uint8_t(utf8[i + k]) & 0x3F);
+      }
+    }
+    i += length;
+    if (c >= 0x20 && c < 0x7F) {
+      name += char(c);
+    } else if (c >= 0xC0 && c < 0x180 && kFolded[c - 0xC0] != '?') {
+      name += kFolded[c - 0xC0];
+    } else {
+      for (const auto& [code, letters] : kTwo) {
+        if (code == c) {
+          name += letters;
+        }
+      }
+    }
+  }
+  while (!name.empty() && name.front() == ' ') {
+    name.erase(name.begin());
+  }
+  name = name.substr(0, 15);
+  while (!name.empty() && name.back() == ' ') {
+    name.pop_back();
+  }
+  return name;
+}
+
+}  // namespace
+
 UserProfile::UserProfile() {
   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
   // if non-zero, it prevents the user from playing the game.
   // "You do not have permissions to perform this operation."
   xuid_ = 0xB13EBABEBABEBABE;
-  name_ = "User";
+  // Every profile has this XUID: a launcher's profiles are told apart by their folder
+  // (profile_root), so a save bound to its owner's XUID loads in any of them.
+  name_ = GamerName(REXCVAR_GET(profile_name));
+  if (name_.empty()) {
+    name_ = "User";
+  }
 
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
   // https://github.com/arkem/py360/blob/master/py360/constants.py

@@ -80,8 +80,13 @@ void ContentPackage::LoadPackageLicenseMask(const std::filesystem::path header_p
   fclose(file);
 }
 
-ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path)
-    : kernel_state_(kernel_state), root_path_(root_path) {}
+ContentManager::ContentManager(KernelState* kernel_state, const std::filesystem::path& root_path,
+                               const std::filesystem::path& profile_root)
+    : kernel_state_(kernel_state), root_path_(root_path), profile_root_(profile_root) {}
+
+const std::filesystem::path& ContentManager::RootFor(uint64_t xuid) const {
+  return xuid != 0 && !profile_root_.empty() ? profile_root_ : root_path_;
+}
 
 ContentManager::~ContentManager() = default;
 
@@ -94,9 +99,9 @@ std::filesystem::path ContentManager::ResolvePackageRoot(uint64_t xuid, XContent
   auto title_id_str = fmt::format("{:08X}", title_id);
   auto content_type_str = fmt::format("{:08X}", uint32_t(content_type));
 
-  // Package root path:
+  // Package root path (a user's content in the profile's folder, profile_root):
   // content_root/xuid/title_id/content_type/
-  return root_path_ / xuid_str / title_id_str / content_type_str;
+  return RootFor(xuid) / xuid_str / title_id_str / content_type_str;
 }
 
 std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
@@ -132,7 +137,7 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(const std::string
 
   // Header root path:
   // content_root/xuid/title_id/Headers/content_type/filename.header
-  return root_path_ / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
+  return RootFor(xuid) / xuid_str / title_id_str / kGameContentHeaderDirName / content_type_str /
          final_name;
 }
 
@@ -446,8 +451,12 @@ std::filesystem::path ContentManager::ResolveGameUserContentPath() {
   auto title_id = fmt::format("{:08X}", kernel_state_->title_id());
   auto user_name = rex::to_path(kernel_state_->user_profile()->name());
 
-  // Per-game per-profile data location:
-  // content_root/title_id/profile/user_name
+  // Per-game per-profile data location: content_root/title_id/profile/user_name, or, with a
+  // profile's folder, profile_root/title_id/profile (not by name: renaming the profile keeps its
+  // settings).
+  if (!profile_root_.empty()) {
+    return profile_root_ / title_id / kGameUserContentDirName;
+  }
   return root_path_ / title_id / kGameUserContentDirName / user_name;
 }
 

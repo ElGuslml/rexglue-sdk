@@ -73,7 +73,12 @@ KernelState::KernelState(Runtime* emulator)
   if (!user_data_root.empty()) {
     user_data_root = std::filesystem::absolute(user_data_root);
   }
-  content_manager_ = std::make_unique<xam::ContentManager>(this, user_data_root);
+  std::filesystem::path profile_root = REXCVAR_GET(profile_root);
+  if (!profile_root.empty()) {
+    profile_root = std::filesystem::absolute(profile_root);
+    REXSYS_INFO("Profile \"{}\", folder {}", user_profile_->name(), rex::path_to_utf8(profile_root));
+  }
+  content_manager_ = std::make_unique<xam::ContentManager>(this, user_data_root, profile_root);
 
   if (shared_kernel_state_ != nullptr) {
     REXSYS_ERROR("KernelState constructed but shared_kernel_state_ already set");
@@ -309,8 +314,10 @@ void KernelState::LoadAchievementsData() {
   // Set up the unlock save path and restore persisted state.
   const auto user_root = emulator_->user_data_root();
   if (!user_root.empty()) {
-    achievement_manager_.SetUnlockSavePath(user_root / "achievements" /
-                                           fmt::format("{:08X}.toml", title_id()));
+    // The unlocks are the profile's (profile_root), the achievements' list and icons the game's.
+    const std::filesystem::path profile_root = REXCVAR_GET(profile_root);
+    achievement_manager_.SetUnlockSavePath((profile_root.empty() ? user_root : profile_root) /
+                                           "achievements" / fmt::format("{:08X}.toml", title_id()));
     achievement_manager_.LoadUnlockState();
     // The achievements for launchers, next to the unlocks (recomp branch).
     if (db.is_valid()) {
