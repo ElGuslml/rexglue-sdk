@@ -45,6 +45,10 @@ REXCVAR_DEFINE_INT32(gamepad_subtype, 0, "Input",
                      "0 = gamepad, 6 = guitar, 7 = alternate guitar, 8 = drum kit, 11 = bass guitar. "
                      "Devices of another kind (a real guitar) keep their own")
     .range(0, 0x13);
+REXCVAR_DEFINE_INT32(guitar_subtype, 0, "Input",
+                     "XINPUT_DEVSUBTYPE reported for a guitar: 0 = the driver's (SDL reports every guitar as 6, "
+                     "guitar), 7 = alternate guitar (Guitar Hero's guitars, which Guitar Hero III's engine requires)")
+    .range(0, 0x13);
 namespace rex::input {
 
 namespace {
@@ -236,13 +240,22 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   X_RESULT result = driver->GetDeviceCapabilities(chosen, flags, out_caps);
+  if (result != X_ERROR_SUCCESS) {
+    return result;
+  }
   // A music game asks for the kind of controller and gives a plain gamepad another part (Guitar Hero's
   // band games make it the singer, who needs a microphone). Reported as a guitar or a drum kit, the pad
   // plays that part with the same XInput controls those instruments use (frets on A, B, Y, X and LB,
   // strumming on the D-pad, the whammy bar on the right stick).
   const int32_t subtype = REXCVAR_GET(gamepad_subtype);
-  if (result == X_ERROR_SUCCESS && subtype != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
+  // SDL gives every guitar one joystick type, so the SDL driver reports them all as XINPUT_DEVSUBTYPE_GUITAR,
+  // Rock Band's subtype; Guitar Hero's guitars are XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE on the console.
+  // Guitar Hero III's engine takes only the latter as a guitar and calls the former unsupported.
+  const int32_t guitar = REXCVAR_GET(guitar_subtype);
+  if (subtype != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
     out_caps->sub_type = static_cast<uint8_t>(subtype);
+  } else if (guitar != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GUITAR) {
+    out_caps->sub_type = static_cast<uint8_t>(guitar);
   }
   return result;
 }
