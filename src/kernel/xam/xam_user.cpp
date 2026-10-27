@@ -14,8 +14,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include <rex/cvar.h>
+#include <rex/input/input_system.h>
+#include <rex/runtime.h>
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -41,12 +44,58 @@ REXCVAR_DEFINE_BOOL(signin_ui_cancel, false, "Kernel",
                     "XamShowSigninUI acts as the system's sign-in UI closed without signing anyone "
                     "in (XN_SYS_UI on, then off), as when the player cancels it on the console, "
                     "instead of reporting a sign-in change of user 0");
+REXCVAR_DEFINE_BOOL(signin_guests, false, "Kernel",
+                    "Users 1-3 with a controller are signed in as guests of the profile (user 0), as "
+                    "on the console: named after it (\"Name (1)\"), with default settings that are "
+                    "not saved and no saves of their own");
 
 namespace rex {
 namespace kernel {
 namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
+
+// XUSER_SIGNIN_INFO's dwInfoFlags: the user is a guest.
+constexpr uint32_t kUserInfoFlagGuest = 0x2;
+
+bool xeXamIsGuestUser(uint32_t user_index) {
+  if (!REXCVAR_GET(signin_guests) || user_index == 0 || user_index >= 4) {
+    return false;
+  }
+  auto* kernel_state = REX_KERNEL_STATE();
+  auto* input = kernel_state && kernel_state->emulator()
+                    ? static_cast<rex::input::InputSystem*>(kernel_state->emulator()->input_system())
+                    : nullptr;
+  return input && input->UserHasDevice(user_index);
+}
+
+namespace {
+
+// A guest's XUID: the profile's with the guest's number in its high word, one per user.
+uint64_t GuestXuid(uint32_t user_index) {
+  return REX_KERNEL_STATE()->user_profile()->xuid() ^ (uint64_t(user_index) << 32);
+}
+
+bool IsGuestXuid(uint64_t xuid) {
+  for (uint32_t user_index = 1; user_index < 4; ++user_index) {
+    if (xuid == GuestXuid(user_index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// "Name (1)": the profile's name, cut so that the number fits in its 15 characters.
+std::string GuestName(uint32_t user_index) {
+  std::string suffix = " (" + std::to_string(user_index) + ")";
+  std::string name = REX_KERNEL_STATE()->user_profile()->name();
+  if (name.size() + suffix.size() > 15) {
+    name.resize(15 - suffix.size());
+  }
+  return name + suffix;
+}
+
+}  // namespace
 
 i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
   assert_true(type_mask == 1 || type_mask == 2 || type_mask == 3 || type_mask == 4 ||
@@ -69,6 +118,9 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
         xuid = user_profile->xuid();
         result = X_E_SUCCESS;
       }
+    } else if (xeXamIsGuestUser(user_index)) {
+      xuid = GuestXuid(user_index);
+      result = X_E_SUCCESS;
     }
   } else {
     result = X_E_INVALIDARG;
@@ -80,7 +132,7 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
 u32 XamUserGetSigninState_entry(u32 user_index) {
   uint32_t signin_state = 0;
   if (user_index < 4) {
-    if (user_index == 0) {
+    if (user_index == 0 || xeXamIsGuestUser(user_index)) {
       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
       signin_state = user_profile->signin_state();
     }
@@ -90,10 +142,10 @@ u32 XamUserGetSigninState_entry(u32 user_index) {
 
 typedef struct {
   rex::be<uint64_t> xuid;
-  rex::be<uint32_t> unk08;  // maybe zero?
+  rex::be<uint32_t> info_flags;  // kUserInfoFlagGuest for a guest
   rex::be<uint32_t> signin_state;
-  rex::be<uint32_t> unk10;  // ?
-  rex::be<uint32_t> unk14;  // ?
+  rex::be<uint32_t> guest_number;
+  rex::be<uint32_t> sponsor_user_index;
   char name[16];
 } X_USER_SIGNIN_INFO;
 static_assert_size(X_USER_SIGNIN_INFO, 40);
@@ -104,11 +156,20 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
   }
 
   std::memset(info, 0, sizeof(X_USER_SIGNIN_INFO));
+  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  if (xeXamIsGuestUser(user_index)) {
+    info->xuid = GuestXuid(user_index);
+    info->info_flags = kUserInfoFlagGuest;
+    info->signin_state = user_profile->signin_state();
+    info->guest_number = static_cast<uint32_t>(user_index);
+    info->sponsor_user_index = 0;
+    rex::string::copy_truncating(info->name, GuestName(user_index), rex::countof(info->name));
+    return X_E_SUCCESS;
+  }
   if (user_index) {
     return X_E_NO_SUCH_USER;
   }
 
-  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
   info->xuid = user_profile->xuid();
   info->signin_state = user_profile->signin_state();
   rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
@@ -120,6 +181,10 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
     return X_E_INVALIDARG;
   }
 
+  if (xeXamIsGuestUser(user_index)) {
+    rex::string::copy_truncating(buffer, GuestName(user_index), std::min(buffer_len, uint32_t(16)));
+    return X_E_SUCCESS;
+  }
   if (user_index) {
     return X_E_NO_SUCH_USER;
   }
@@ -135,7 +200,8 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
     return X_E_INVALIDARG;
   }
 
-  if (user_index) {
+  const bool guest = xeXamIsGuestUser(user_index);
+  if (user_index && !guest) {
     return X_E_NO_SUCH_USER;
   }
 
@@ -144,7 +210,7 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
   }
 
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
-  auto user_name = rex::string::to_utf16(user_profile->name());
+  auto user_name = rex::string::to_utf16(guest ? GuestName(user_index) : user_profile->name());
   rex::string::copy_and_swap_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
   return X_E_SUCCESS;
 }
@@ -161,14 +227,18 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
                                       be<uint32_t>* setting_ids, uint32_t unk,
                                       be<uint32_t>* buffer_size_ptr, uint8_t* buffer,
                                       XAM_OVERLAPPED* overlapped) {
+  // A guest (signin_guests) reads every setting unset: the title's defaults, as for a new profile.
+  bool guest = false;
   if (!xuid_count) {
     assert_null(xuids);
+    guest = xeXamIsGuestUser(user_index);
   } else {
     assert_true(xuid_count == 1);
     assert_not_null(xuids);
     // TODO(gibbed): allow proper lookup of arbitrary XUIDs
     const auto& user_profile = REX_KERNEL_STATE()->user_profile();
-    assert_true(static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
+    guest = REXCVAR_GET(signin_guests) && IsGuestXuid(static_cast<uint64_t>(xuids[0]));
+    assert_true(guest || static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
     // TODO(gibbed): we assert here, but in case a title passes xuid_count > 1
     // until it's implemented for release builds...
     xuid_count = 1;
@@ -235,7 +305,7 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
   // Title ID = 0 means us.
   // 0xfffe07d1 = profile?
 
-  if (!xuids && user_index) {
+  if (!xuids && user_index && !guest) {
     // Only support user 0.
     if (overlapped) {
       REX_KERNEL_STATE()->CompleteOverlappedImmediate(
@@ -281,12 +351,12 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
                                             buffer_size, needed_header_size);
   for (uint32_t n = 0; n < setting_count; ++n) {
     uint32_t setting_id = setting_ids[n];
-    auto setting = user_profile->GetSetting(setting_id);
+    auto setting = guest ? nullptr : user_profile->GetSetting(setting_id);
 
     std::memset(out_setting, 0, sizeof(X_USER_PROFILE_SETTING));
     out_setting->from = !setting || !setting->is_set ? 0 : setting->is_title_specific() ? 2 : 1;
     if (xuids) {
-      out_setting->xuid = user_profile->xuid();
+      out_setting->xuid = static_cast<uint64_t>(xuids[0]);
     } else {
       out_setting->user_index = static_cast<uint32_t>(user_index);
     }
@@ -336,6 +406,15 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
                                       ppc_ptr_t<XAM_OVERLAPPED> overlapped) {
   if (!setting_count || !settings) {
     return X_ERROR_INVALID_PARAMETER;
+  }
+
+  // A guest's settings are not kept, as on the console: written and forgotten.
+  if (xeXamIsGuestUser(user_index)) {
+    if (overlapped) {
+      REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped.guest_address(), X_ERROR_SUCCESS);
+      return X_ERROR_IO_PENDING;
+    }
+    return X_ERROR_SUCCESS;
   }
 
   if (user_index) {
@@ -407,7 +486,7 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value) 
       return X_ERROR_INVALID_PARAMETER;
     }
 
-    if (user_index) {
+    if (user_index && !xeXamIsGuestUser(user_index)) {
       return X_ERROR_NO_SUCH_USER;
     }
   }
@@ -474,7 +553,7 @@ u32 XamUserAreUsersFriends_entry(u32 user_index, u32 unk1, u32 unk2, mapped_u32 
   if (user_index >= 4) {
     result = X_ERROR_INVALID_PARAMETER;
   } else {
-    if (user_index == 0) {
+    if (user_index == 0 || xeXamIsGuestUser(user_index)) {
       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
       if (user_profile->signin_state() == 0) {
         result = X_ERROR_NOT_LOGGED_ON;

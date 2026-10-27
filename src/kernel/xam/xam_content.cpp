@@ -75,7 +75,9 @@ u32 XamContentCreateEnumerator_entry(u32 user_index, u32 device_id, u32 content_
     *buffer_size_ptr = sizeof(XCONTENT_DATA) * items_per_enumerate;
   }
 
-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
+  // A guest (signin_guests) has no content of its own: it sees the common content only (downloaded content).
+  const bool guest = xeXamIsGuestUser(user_index);
+  uint64_t xuid = guest ? 0 : REX_KERNEL_STATE()->user_profile()->xuid();
 
   auto e = make_object<XStaticEnumerator<XCONTENT_DATA>>(REX_KERNEL_STATE(), items_per_enumerate);
   auto result = e->Initialize(0xFF, 0xFE, 0x20005, 0x20007, 0);
@@ -133,6 +135,14 @@ u32 xeXamContentCreate(u32 user_index, mapped_string root_name, mapped_void cont
 
   if (content_data.content_type == XContentType::kMarketplaceContent) {
     xuid = 0;
+  } else if (xeXamIsGuestUser(user_index)) {
+    // Every user's content is the profile's here: a guest's save would be the profile's own.
+    REXKRNL_WARN("XamContentCreate: user {} is a guest, no saves of its own", static_cast<uint32_t>(user_index));
+    if (overlapped_ptr) {
+      REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(), X_ERROR_ACCESS_DENIED);
+      return X_ERROR_IO_PENDING;
+    }
+    return X_ERROR_ACCESS_DENIED;
   }
 
   auto content_manager = REX_KERNEL_STATE()->content_manager();
@@ -381,7 +391,10 @@ u32 XamContentDelete_entry(u32 user_index, mapped_void content_data_ptr,
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
   XCONTENT_AGGREGATE_DATA content_data = *content_data_ptr.as<XCONTENT_DATA*>();
 
-  auto result = REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
+  // A guest (signin_guests) deletes nothing: every user's content is the profile's here.
+  auto result = xeXamIsGuestUser(user_index)
+                    ? static_cast<X_RESULT>(X_ERROR_ACCESS_DENIED)
+                    : REX_KERNEL_STATE()->content_manager()->DeleteContent(xuid, content_data);
 
   if (overlapped_ptr) {
     REX_KERNEL_STATE()->CompleteOverlappedImmediate(overlapped_ptr.guest_address(), result);

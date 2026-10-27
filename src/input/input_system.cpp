@@ -24,6 +24,7 @@
 #include <rex/input/state_merge.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
+#include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 
 REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
@@ -296,6 +297,20 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 
   X_RESULT result = GetStateForUI(user_index, out_state);
 
+  // SetPrimaryPressWindow: a new press on another user's controller makes it user 0's. This read sees that user's
+  // new controller (user 0's old one) at rest; user 0's next read sees the press.
+  if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers && primary_press_window_.load()) {
+    const uint16_t buttons = static_cast<uint16_t>(out_state->gamepad.buttons);
+    const uint16_t pressed = static_cast<uint16_t>(buttons & ~window_buttons_[user_index]);
+    window_buttons_[user_index] = buttons;
+    if (user_index != 0 && pressed != 0 && MakePrimary(user_index)) {
+      window_buttons_[0] = 0;
+      window_buttons_[user_index] = 0xFFFF;
+      std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
+      return result;
+    }
+  }
+
   if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers &&
       consumed_buttons_[user_index] != 0) {
     const uint16_t buttons = out_state->gamepad.buttons;
@@ -390,6 +405,85 @@ void InputSystem::RemoveUIInputBlocker() {
 void InputSystem::SetHostInputFilter(HostInputFilter filter) {
   std::lock_guard lock(host_filter_mutex_);
   host_filter_ = std::move(filter);
+}
+
+void InputSystem::SetPrimaryPressWindow(bool open) {
+  if (primary_press_window_.exchange(open) == open || !open) {
+    return;
+  }
+  // Opening: whatever is held now is not a new press until it is released.
+  window_buttons_.fill(0xFFFF);
+}
+
+bool InputSystem::UserHasDevice(uint32_t user_index) {
+  if (!assignment_ || user_index >= kMaxGuestUsers) {
+    return false;
+  }
+  RefreshDevices();
+  std::vector<DeviceId> ids;
+  assignment_->DevicesForUser(user_index, ids);
+  return !ids.empty();
+}
+
+bool InputSystem::MakePrimary(uint32_t user_index) {
+  if (!assignment_ || user_index == 0 || user_index >= kMaxGuestUsers) {
+    return false;
+  }
+  // The user's physical controller (the keyboard's pad is always user 0's) and its ordinal, which SlotAssignment
+  // makes its user index.
+  std::vector<DeviceId> ids;
+  assignment_->DevicesForUser(user_index, ids);
+  uint32_t ordinal = UINT32_MAX;
+  for (const auto& device : devices_) {
+    if (!device.synthetic && std::find(ids.begin(), ids.end(), device.id) != ids.end()) {
+      ordinal = device.ordinal;
+      break;
+    }
+  }
+  if (ordinal == UINT32_MAX || ordinal == 0) {
+    return false;
+  }
+  for (auto& device : devices_) {
+    if (device.synthetic) {
+      continue;
+    }
+    if (device.ordinal == ordinal) {
+      device.ordinal = 0;
+    } else if (device.ordinal == 0) {
+      device.ordinal = ordinal;
+    }
+  }
+  std::vector<size_t> order(devices_.size());
+  for (size_t i = 0; i < order.size(); i++) {
+    order[i] = i;
+  }
+  std::stable_sort(order.begin(), order.end(),
+                   [&](size_t a, size_t b) { return devices_[a].ordinal < devices_[b].ordinal; });
+  std::vector<DeviceInfo> devices;
+  std::vector<InputDriver*> owners;
+  for (size_t i : order) {
+    devices.push_back(devices_[i]);
+    owners.push_back(device_owners_[i]);
+  }
+  devices_ = std::move(devices);
+  device_owners_ = std::move(owners);
+  assignment_->OnDevicesChanged(devices_);
+
+  std::swap(user_max_joystick_value_[0], user_max_joystick_value_[user_index]);
+  consumed_buttons_[0] = 0;
+  consumed_buttons_[user_index] = 0;
+  const bool was_connected = connected_users_.test(0);
+  connected_users_.set(0, true);
+  connected_users_.set(user_index, was_connected);
+  REXLOG_INFO("The controller in slot {} pressed first: it is now slot 0, the profile's (slot 0's controller moves to "
+              "slot {}).",
+              user_index, user_index);
+
+  // The guest asks for the controllers' kinds again (a guitar and a pad swapped).
+  if (auto* kernel_state = REX_KERNEL_STATE()) {
+    kernel_state->BroadcastNotification(kXNotificationSystemInputDevicesChanged, 0);
+  }
+  return true;
 }
 
 bool InputSystem::GetVibrationEnabled() const {
@@ -562,6 +656,16 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   input->AddDriver(std::make_unique<nop::NopInputDriver>(nullptr, nop_index));
   input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
   return input;
+}
+
+void SetPrimaryPressWindow(bool open) {
+  auto* kernel_state = REX_KERNEL_STATE();
+  if (!kernel_state || !kernel_state->emulator()) {
+    return;
+  }
+  if (auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system())) {
+    input->SetPrimaryPressWindow(open);
+  }
 }
 
 }  // namespace rex::input

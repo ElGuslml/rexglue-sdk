@@ -72,6 +72,15 @@ class InputSystem : public system::IInputSystem {
   bool GetVibrationEnabled() const;
   void ToggleVibration();
 
+  /// The player who starts the game gets the profile, as on the console, where the controller that presses Start
+  /// signs in: while the window is open (a game opens it on its title screen), a new button press on a controller
+  /// that is not user 0's makes that controller user 0, the signed-in profile's, and moves user 0's controller to
+  /// the user it leaves. The guest does not see that press on the old user; it sees it on user 0 at its next read.
+  /// Closed by default. Called on the guest's threads.
+  void SetPrimaryPressWindow(bool open);
+  /// Whether a controller (or the keyboard's pad) is assigned to the user.
+  bool UserHasDevice(uint32_t user_index);
+
   std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
   /// Guest user whose device most recently produced a button press.
   uint32_t GetLastUsedUser() const { return last_used_user_; }
@@ -88,6 +97,8 @@ class InputSystem : public system::IInputSystem {
   DeviceId ChooseDeviceForUser(uint32_t user_index) const;
 
   void UpdateConnectedUser(uint32_t user_index, bool connected);
+  /// SetPrimaryPressWindow's swap: the user's controller becomes user 0's and user 0's takes its user.
+  bool MakePrimary(uint32_t user_index);
   void AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const;
   X_INPUT_VIBRATION ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const;
 
@@ -114,10 +125,17 @@ class InputSystem : public system::IInputSystem {
 
   std::mutex host_filter_mutex_;
   HostInputFilter host_filter_;
+
+  std::atomic<bool> primary_press_window_{false};
+  // The buttons each user's last read had while the window is open, to tell a new press from a held button.
+  std::array<uint16_t, kMaxGuestUsers> window_buttons_ = {};
 };
 
 /// Create a default InputSystem with SDL + MnK + NOP drivers.
 /// In tool mode, only the NOP driver is added.
 std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode);
+
+/// The runtime's InputSystem::SetPrimaryPressWindow, for a game's hooks; nothing without an input system.
+void SetPrimaryPressWindow(bool open);
 
 }  // namespace rex::input
