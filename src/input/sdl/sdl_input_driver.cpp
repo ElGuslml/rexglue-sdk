@@ -465,6 +465,8 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
     SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(controller.sdl)), guid_text,
                      static_cast<int>(sizeof(guid_text)));
     info.guid = guid_text;
+    const char* serial = SDL_GetGamepadSerial(controller.sdl);
+    info.serial = serial ? serial : "";
     info.subtype = GamepadSubType(controller.sdl);
     info.synthetic = false;
     out.push_back(info);
@@ -787,10 +789,12 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
       "XInputSubType({} = 0x{:02X}), "
       "VendorID(0x{:04X}), "
       "ProductID(0x{:04X}), "
-      "GUID({})",
+      "GUID({}), "
+      "Serial({})",
       SDL_GetGamepadName(controller), JoystickTypeName(joy_type),
       static_cast<int>(SDL_GetGamepadType(controller)), XInputSubTypeName(subtype), subtype,
-      SDL_GetGamepadVendor(controller), SDL_GetGamepadProduct(controller), guid_text);
+      SDL_GetGamepadVendor(controller), SDL_GetGamepadProduct(controller), guid_text,
+      SDL_GetGamepadSerial(controller) ? SDL_GetGamepadSerial(controller) : "");
 
   // SDL_GetGamepadPlayerIndex is deliberately ignored: on Windows it reports
   // the XInput user index the OS assigned, which is unrelated to connection

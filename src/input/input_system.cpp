@@ -10,8 +10,10 @@
  */
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
+#include <string_view>
 
 #include <rex/dbg.h>
 #include <rex/input/device_assignment.h>
@@ -49,6 +51,11 @@ REXCVAR_DEFINE_INT32(guitar_subtype, 0, "Input",
                      "XINPUT_DEVSUBTYPE reported for a guitar: 0 = the driver's (SDL reports every guitar as 6, "
                      "guitar), 7 = alternate guitar (Guitar Hero's guitars, which Guitar Hero III's engine requires)")
     .range(0, 0x13);
+REXCVAR_DEFINE_STRING(gamepad_device_subtypes, "", "Input",
+                      "XINPUT_DEVSUBTYPE reported for particular gamepads, in place of gamepad_subtype: "
+                      "controller=subtype entries separated by commas, a controller named by its serial "
+                      "number or else its SDL GUID (as the log's OnControllerDeviceAdded lines give them; "
+                      "keyboard = the keyboard's emulated pad), 1 = gamepad. A launcher writes it");
 namespace rex::input {
 
 namespace {
@@ -60,6 +67,63 @@ constexpr uint32_t kSyntheticOrdinal = UINT32_MAX;
 
 // XN_SYS_INPUTDEVICESCHANGED
 constexpr uint32_t kXNotificationSystemInputDevicesChanged = 0x00000012;
+
+std::string_view Trim(std::string_view text) {
+  while (!text.empty() && (text.front() == ' ' || text.front() == '	')) {
+    text.remove_prefix(1);
+  }
+  while (!text.empty() && (text.back() == ' ' || text.back() == '	')) {
+    text.remove_suffix(1);
+  }
+  return text;
+}
+
+bool EqualsIgnoringCase(std::string_view a, std::string_view b) {
+  return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+           return std::tolower(static_cast<unsigned char>(x)) ==
+                  std::tolower(static_cast<unsigned char>(y));
+         });
+}
+
+// The subtype gamepad_device_subtypes gives a device, -1 when it does not name it. A serial number
+// tells two pads of one model apart, which share a GUID; a pad without one (XInput's) goes by its GUID.
+int32_t DeviceSubtypeSetting(const DeviceInfo& device) {
+  const std::string& text = REXCVAR_GET(gamepad_device_subtypes);
+  int32_t by_guid = -1;
+  size_t start = 0;
+  while (start < text.size()) {
+    size_t end = text.find(',', start);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    const std::string_view entry(text.data() + start, end - start);
+    start = end + 1;
+    const size_t equals = entry.find('=');
+    if (equals == std::string_view::npos) {
+      continue;
+    }
+    const std::string_view key = Trim(entry.substr(0, equals));
+    const std::string_view value = Trim(entry.substr(equals + 1));
+    int32_t subtype = -1;
+    if (std::from_chars(value.data(), value.data() + value.size(), subtype).ec != std::errc() ||
+        subtype < 0 || subtype > 0x13) {
+      continue;
+    }
+    if (device.synthetic) {
+      if (EqualsIgnoringCase(key, "keyboard")) {
+        return subtype;
+      }
+      continue;
+    }
+    if (!device.serial.empty() && EqualsIgnoringCase(key, device.serial)) {
+      return subtype;
+    }
+    if (!device.guid.empty() && EqualsIgnoringCase(key, device.guid)) {
+      by_guid = subtype;
+    }
+  }
+  return by_guid;
+}
 
 }  // namespace
 
@@ -252,7 +316,14 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   // Rock Band's subtype; Guitar Hero's guitars are XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE on the console.
   // Guitar Hero III's engine takes only the latter as a guitar and calls the former unsupported.
   const int32_t guitar = REXCVAR_GET(guitar_subtype);
-  if (subtype != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
+  // A pad of its own part (Guitar Hero's singer stays a gamepad while the others play guitars).
+  const DeviceInfo* info = DeviceInfoFor(chosen);
+  const int32_t own = info ? DeviceSubtypeSetting(*info) : -1;
+  if (own >= 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
+    if (own > XINPUT_DEVSUBTYPE_GAMEPAD) {
+      out_caps->sub_type = static_cast<uint8_t>(own);
+    }
+  } else if (subtype != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
     out_caps->sub_type = static_cast<uint8_t>(subtype);
   } else if (guitar != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GUITAR) {
     out_caps->sub_type = static_cast<uint8_t>(guitar);
