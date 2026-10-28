@@ -383,6 +383,18 @@ kPacketInfo XmaContext::GetPacketInfo(uint8_t* packet, uint32_t frame_offset) {
 
   while (true) {
     if (stream.BitsRemaining() < kBitsPerFrameHeader) {
+      // A frame starts here (the packet's first frame offset, or the previous frame's last bit said another follows)
+      // but its 15-bit length runs into the next packet. XMA2 packets count it in their header (below); XMA1 packets
+      // (GH Aerosmith's FMOD) have no frame count. Left out, the frame before it was taken for the packet's last and
+      // the decoder went on at the next packet's first frame, dropping this one: a frame in a few hundred, so a
+      // song's stems drifted apart. Counted, it is decoded through the split header path in Decode.
+      if (stream.BitsRemaining() > 0) {
+        if (stream.offset_bits() == frame_offset) {
+          packet_info.current_frame_ = packet_info.frame_count_;
+          packet_info.current_frame_size_ = 0;
+        }
+        packet_info.frame_count_++;
+      }
       break;
     }
 
