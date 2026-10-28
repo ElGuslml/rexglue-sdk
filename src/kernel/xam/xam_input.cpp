@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/audio/audio_system.h>
+#include <rex/audio/usb_microphone.h>
 #include <rex/input/input.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/xam/private.h>
@@ -188,6 +190,23 @@ i32 XamUserGetDeviceContext_entry(u32 user_index, u32 unk, mapped_u32 out_ptr) {
   // If this function fails they assume zero, so let's fail AND
   // set zero just to be safe.
   *out_ptr = 0;
+  // The XDK's USB microphone library asks for its microphones 0 and 1 here (rex/audio/usb_microphone.h).
+  if (unk == rex::audio::UsbMicrophones::kDeviceType) {
+    auto* audio_system =
+        static_cast<rex::audio::AudioSystem*>(REX_KERNEL_STATE()->emulator()->audio_system());
+    auto* microphones = audio_system ? audio_system->usb_microphones() : nullptr;
+    uint32_t context = 0;
+    switch (microphones ? microphones->DeviceContext(user_index, &context)
+                        : rex::audio::UsbMicrophones::Presence::kNotConfigured) {
+      case rex::audio::UsbMicrophones::Presence::kConnected:
+        *out_ptr = context;
+        return X_E_SUCCESS;
+      case rex::audio::UsbMicrophones::Presence::kDisconnected:
+        return X_E_DEVICE_NOT_CONNECTED;
+      case rex::audio::UsbMicrophones::Presence::kNotConfigured:
+        break;
+    }
+  }
   if (!user_index || (user_index & 0xFF) == 0xFF) {
     return X_E_SUCCESS;
   } else {

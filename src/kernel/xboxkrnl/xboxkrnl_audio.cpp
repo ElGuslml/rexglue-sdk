@@ -13,6 +13,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <rex/audio/audio_system.h>
+#include <rex/audio/usb_microphone.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
@@ -105,8 +106,19 @@ u32 XAudioSubmitRenderDriverFrame_entry(mapped_void driver_ptr, mapped_void samp
   return X_ERROR_SUCCESS;
 }
 
+// The XDK's USB microphone library's requests (rex/audio/usb_microphone.h).
+u32 MicDeviceRequest_entry(u32 request_ptr) {
+  auto* audio_system =
+      static_cast<audio::AudioSystem*>(REX_KERNEL_STATE()->emulator()->audio_system());
+  if (!audio_system || !audio_system->usb_microphones()) {
+    return 0xC000009D;  // STATUS_DEVICE_NOT_CONNECTED
+  }
+  return audio_system->usb_microphones()->Request(request_ptr);
+}
+
 }  // namespace rex::kernel::xboxkrnl
 
+REX_EXPORT(__imp__MicDeviceRequest, rex::kernel::xboxkrnl::MicDeviceRequest_entry)
 REX_EXPORT(__imp__XAudioGetSpeakerConfig, rex::kernel::xboxkrnl::XAudioGetSpeakerConfig_entry)
 REX_EXPORT(__imp__XAudioGetVoiceCategoryVolumeChangeMask,
            rex::kernel::xboxkrnl::XAudioGetVoiceCategoryVolumeChangeMask_entry)

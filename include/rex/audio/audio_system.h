@@ -32,6 +32,7 @@ namespace rex::audio {
 constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
 
 class AudioDriver;
+class UsbMicrophones;
 class XmaDecoder;
 
 class AudioSystem : public system::IAudioSystem {
@@ -41,6 +42,7 @@ class AudioSystem : public system::IAudioSystem {
   memory::Memory* memory() const { return memory_; }
   runtime::FunctionDispatcher* function_dispatcher() const { return function_dispatcher_; }
   XmaDecoder* xma_decoder() const { return xma_decoder_.get(); }
+  UsbMicrophones* usb_microphones() const { return usb_microphones_.get(); }
 
   virtual X_STATUS Setup(system::KernelState* kernel_state);
   virtual void Shutdown();
@@ -73,6 +75,7 @@ class AudioSystem : public system::IAudioSystem {
   memory::Memory* memory_ = nullptr;
   runtime::FunctionDispatcher* function_dispatcher_ = nullptr;
   std::unique_ptr<XmaDecoder> xma_decoder_;
+  std::unique_ptr<UsbMicrophones> usb_microphones_;
   uint32_t queued_frames_;
 
   std::atomic<bool> worker_running_ = {false};

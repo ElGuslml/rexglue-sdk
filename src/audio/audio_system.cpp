@@ -13,6 +13,7 @@
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
 #include <rex/audio/flags.h>
+#include <rex/audio/usb_microphone.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
@@ -72,6 +73,7 @@ AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
   wait_handles_[kMaximumClientCount] = shutdown_event_.get();
 
   xma_decoder_ = std::make_unique<rex::audio::XmaDecoder>(function_dispatcher_);
+  usb_microphones_ = std::make_unique<UsbMicrophones>(function_dispatcher_);
 
   resume_event_ = rex::thread::Event::CreateAutoResetEvent(false);
   assert_not_null(resume_event_);
@@ -88,6 +90,7 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
   if (result) {
     return result;
   }
+  usb_microphones_->Setup(kernel_state);
 
   worker_running_ = true;
   worker_thread_ = system::object_ref<system::XHostThread>(
@@ -224,6 +227,7 @@ void AudioSystem::Shutdown() {
   if (xma_decoder_) {
     xma_decoder_->Shutdown();
   }
+  usb_microphones_->Shutdown();
 
   worker_running_ = false;
   shutdown_event_->Set();

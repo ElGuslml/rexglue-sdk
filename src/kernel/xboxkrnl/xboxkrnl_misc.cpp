@@ -91,7 +91,6 @@ REX_EXPORT_STUB(__imp__IptvSetBoundaryKey);
 REX_EXPORT_STUB(__imp__IptvSetSessionKey);
 REX_EXPORT_STUB(__imp__IptvVerifyOmac1Signature);
 REX_EXPORT_STUB(__imp__McaDeviceRequest);
-REX_EXPORT_STUB(__imp__MicDeviceRequest);
 REX_EXPORT_STUB(__imp__MtpdBeginTransaction);
 REX_EXPORT_STUB(__imp__MtpdCancelTransaction);
 REX_EXPORT_STUB(__imp__MtpdEndTransaction);
