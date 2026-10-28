@@ -141,9 +141,15 @@ bool XmaContext::Work() {
     }
   }
 
+  // Read == write is a full buffer only if this pass wrote into it; a buffer the guest has drained and that got nothing
+  // (no input left) is empty and stays valid. Marked invalid, it reads as full: FMOD (GH Aerosmith) then takes the same
+  // stale frame again every mix, through to the sound's declared length, instead of seeing the end of its data, so each
+  // loop of a streamed sound ended in ~80 ms of its last frame repeated.
+  const bool wrote = output_rb.write_offset() != initial_data.output_buffer_write_offset * kOutputBytesPerBlock ||
+                     remaining_subframe_blocks_in_output_buffer_ <= 0;
   data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
 
-  if (output_rb.empty()) {
+  if (output_rb.empty() && wrote) {
     data.output_buffer_valid = 0;
   }
 
