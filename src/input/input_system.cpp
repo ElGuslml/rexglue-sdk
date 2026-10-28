@@ -24,6 +24,7 @@
 #include <rex/input/nop/nop_input_driver.h>
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/input/state_merge.h>
+#include <rex/input/tap_strum.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -56,6 +57,19 @@ REXCVAR_DEFINE_STRING(gamepad_device_subtypes, "", "Input",
                       "controller=subtype entries separated by commas, a controller named by its serial "
                       "number or else its SDL GUID (as the log's OnControllerDeviceAdded lines give them; "
                       "keyboard = the keyboard's emulated pad), 1 = gamepad. A launcher writes it");
+REXCVAR_DEFINE_STRING(gamepad_tap_target, "", "Input",
+                      "As mnk_tap_target, for a gamepad the game is told is a guitar (gamepad_subtype, "
+                      "gamepad_device_subtypes): a control it also presses, briefly, when one of "
+                      "gamepad_tap_sources is pressed (a music game's strum on each fret), timed by "
+                      "mnk_tap_window_ms and mnk_tap_hold_ms and allowed by the game's gate as the keyboard's. "
+                      "Empty: off");
+REXCVAR_DEFINE_STRING(gamepad_tap_sources, "", "Input",
+                      "The controls whose press presses gamepad_tap_target, comma-separated (a,b,y,x,lb)");
+REXCVAR_DEFINE_BOOL(gamepad_whammy_rest, false, "Input",
+                    "A gamepad, or the keyboard's pad, that the game is told is a guitar: its right stick's X "
+                    "axis is the whammy bar, at rest (-32768) while the stick is centred and fully pressed at "
+                    "either side, as a guitar's bar. Off: the stick's own value, which a guitar game reads as "
+                    "the bar held half way");
 namespace rex::input {
 
 namespace {
@@ -123,6 +137,36 @@ int32_t DeviceSubtypeSetting(const DeviceInfo& device) {
     }
   }
   return by_guid;
+}
+
+// The subtype a game is told for a device whose driver reports `subtype` (GetCapabilities).
+//
+// A music game asks for the kind of controller and gives a plain gamepad another part (Guitar Hero's band games make
+// it the singer, who needs a microphone). Reported as a guitar or a drum kit (gamepad_subtype), the pad plays that
+// part with the same XInput controls those instruments use (frets on A, B, Y, X and LB, strumming on the D-pad, the
+// whammy bar on the right stick); a pad named in gamepad_device_subtypes plays its own (Guitar Hero's singer stays a
+// gamepad while the others play guitars). SDL gives every guitar one joystick type, so the SDL driver reports them
+// all as XINPUT_DEVSUBTYPE_GUITAR, Rock Band's subtype; Guitar Hero's guitars are XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE
+// on the console, and Guitar Hero III's engine takes only the latter as a guitar (guitar_subtype).
+uint8_t ReportedSubtype(const DeviceInfo* device, uint8_t subtype) {
+  if (subtype == XINPUT_DEVSUBTYPE_GAMEPAD) {
+    const int32_t own = device ? DeviceSubtypeSetting(*device) : -1;
+    if (own >= 0) {
+      return own > XINPUT_DEVSUBTYPE_GAMEPAD ? static_cast<uint8_t>(own) : subtype;
+    }
+    const int32_t gamepad = REXCVAR_GET(gamepad_subtype);
+    return gamepad != 0 ? static_cast<uint8_t>(gamepad) : subtype;
+  }
+  const int32_t guitar = REXCVAR_GET(guitar_subtype);
+  if (guitar != 0 && subtype == XINPUT_DEVSUBTYPE_GUITAR) {
+    return static_cast<uint8_t>(guitar);
+  }
+  return subtype;
+}
+
+bool IsGuitarSubtype(uint8_t subtype) {
+  return subtype == XINPUT_DEVSUBTYPE_GUITAR || subtype == XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE ||
+         subtype == XINPUT_DEVSUBTYPE_GUITAR_BASS;
 }
 
 }  // namespace
@@ -229,6 +273,8 @@ void InputSystem::RefreshDevices() {
     if (std::none_of(seen.begin(), seen.end(),
                      [&](const DeviceInfo& d) { return d.id == old.id; })) {
       active_devices_.Forget(old.id);
+      std::lock_guard lock(pad_taps_mutex_);
+      pad_taps_.erase(old.id);
       changed = true;
     }
   }
@@ -307,28 +353,40 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   if (result != X_ERROR_SUCCESS) {
     return result;
   }
-  // A music game asks for the kind of controller and gives a plain gamepad another part (Guitar Hero's
-  // band games make it the singer, who needs a microphone). Reported as a guitar or a drum kit, the pad
-  // plays that part with the same XInput controls those instruments use (frets on A, B, Y, X and LB,
-  // strumming on the D-pad, the whammy bar on the right stick).
-  const int32_t subtype = REXCVAR_GET(gamepad_subtype);
-  // SDL gives every guitar one joystick type, so the SDL driver reports them all as XINPUT_DEVSUBTYPE_GUITAR,
-  // Rock Band's subtype; Guitar Hero's guitars are XINPUT_DEVSUBTYPE_GUITAR_ALTERNATE on the console.
-  // Guitar Hero III's engine takes only the latter as a guitar and calls the former unsupported.
-  const int32_t guitar = REXCVAR_GET(guitar_subtype);
-  // A pad of its own part (Guitar Hero's singer stays a gamepad while the others play guitars).
-  const DeviceInfo* info = DeviceInfoFor(chosen);
-  const int32_t own = info ? DeviceSubtypeSetting(*info) : -1;
-  if (own >= 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
-    if (own > XINPUT_DEVSUBTYPE_GAMEPAD) {
-      out_caps->sub_type = static_cast<uint8_t>(own);
-    }
-  } else if (subtype != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GAMEPAD) {
-    out_caps->sub_type = static_cast<uint8_t>(subtype);
-  } else if (guitar != 0 && out_caps->sub_type == XINPUT_DEVSUBTYPE_GUITAR) {
-    out_caps->sub_type = static_cast<uint8_t>(guitar);
-  }
+  out_caps->sub_type = ReportedSubtype(DeviceInfoFor(chosen), out_caps->sub_type);
   return result;
+}
+
+bool InputSystem::PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad) {
+  const bool whammy_rest = REXCVAR_GET(gamepad_whammy_rest);
+  if (device.subtype != XINPUT_DEVSUBTYPE_GAMEPAD) {
+    // A real guitar's bar is a bar already.
+    return whammy_rest && IsGuitarSubtype(device.subtype);
+  }
+  if (!IsGuitarSubtype(ReportedSubtype(&device, device.subtype))) {
+    return false;
+  }
+  // The whammy bar: a guitar's rests at -32768 and the game reads the axis from there (Guitar Hero: Metallica takes
+  // its scripts' resting position, -0.76 of the axis, as the bar at rest), so a centred stick, 0, was the bar held
+  // about half way on every sustain. The stick's distance from the centre, on either side, is the bar's travel, past
+  // a tenth of it, where a stick may drift.
+  if (whammy_rest) {
+    constexpr int32_t kDeadZone = 3277;
+    const int32_t x = gamepad->thumb_rx;
+    const int32_t travel = std::max(0, std::min(32767, x < 0 ? -x : x) - kDeadZone);
+    gamepad->thumb_rx = static_cast<int16_t>(-32768 + int64_t(travel) * 65535 / (32767 - kDeadZone));
+  }
+  // The frets strum as they are pressed (the keyboard's pad does it in its own driver, mnk_tap_target).
+  if (!device.synthetic) {
+    const uint16_t target = TapControlBits(REXCVAR_GET(gamepad_tap_target));
+    if (target != 0) {
+      std::lock_guard lock(pad_taps_mutex_);
+      gamepad->buttons = pad_taps_[device.id].Apply(
+          gamepad->buttons, target, TapControlBits(REXCVAR_GET(gamepad_tap_sources)),
+          REXCVAR_GET(mnk_tap_window_ms), REXCVAR_GET(mnk_tap_hold_ms));
+    }
+  }
+  return whammy_rest;
 }
 
 void InputSystem::UpdateConnectedUser(uint32_t user_index, bool connected) {
@@ -436,6 +494,10 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_stat
 
   X_INPUT_STATE merged = {};
   bool any = false;
+  // The user's whammy bars (PlayAsGuitar): the one pressed furthest. The merge takes the right stick's larger
+  // magnitude, which for bars at rest at -32768 is the bar at rest.
+  bool whammy = false;
+  int32_t whammy_rx = -32768;
   for (DeviceId id : ids) {
     auto* driver = DriverForDevice(id);
     if (!driver) {
@@ -445,7 +507,12 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_stat
     if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
       continue;
     }
+    // The controller in the player's hands, by what the player does (a stick read as a bar at rest is not moved).
     active_devices_.Observe(user_index, id, state.gamepad);
+    if (const DeviceInfo* info = DeviceInfoFor(id); info && PlayAsGuitar(*info, &state.gamepad)) {
+      whammy = true;
+      whammy_rx = std::max<int32_t>(whammy_rx, state.gamepad.thumb_rx);
+    }
     if (!any) {
       merged = state;
       any = true;
@@ -457,6 +524,9 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_stat
   if (!any) {
     UpdateConnectedUser(user_index, false);
     return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  if (whammy) {
+    merged.gamepad.thumb_rx = static_cast<int16_t>(whammy_rx);
   }
   UpdateConnectedUser(user_index, true);
   AdjustDeadzoneLevels(user_index, &merged.gamepad);

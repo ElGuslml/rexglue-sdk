@@ -12,6 +12,7 @@
 
 #include <rex/cvar.h>
 #include <rex/input/input.h>
+#include <rex/input/tap_strum.h>
 #include <rex/logging.h>
 #include <rex/ui/keybinds.h>
 #include <rex/ui/virtual_key.h>
@@ -442,113 +443,14 @@ X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-namespace {
-
-std::atomic<bool (*)()> g_tap_gate{nullptr};
-
-}  // namespace
-
 void SetTapGate(bool (*gate)()) {
-  g_tap_gate.store(gate, std::memory_order_release);
+  SetTapGateFunction(gate);
 }
-
-namespace {
-
-// A comma-separated list of the pad's controls (mnk_tap_target, mnk_tap_sources) as XINPUT_GAMEPAD
-// button bits.
-uint16_t ControlBits(std::string_view list) {
-  struct Name {
-    std::string_view name;
-    uint16_t bit;
-  };
-  static constexpr Name kNames[] = {
-      {"a", X_INPUT_GAMEPAD_A},
-      {"b", X_INPUT_GAMEPAD_B},
-      {"x", X_INPUT_GAMEPAD_X},
-      {"y", X_INPUT_GAMEPAD_Y},
-      {"lb", X_INPUT_GAMEPAD_LEFT_SHOULDER},
-      {"rb", X_INPUT_GAMEPAD_RIGHT_SHOULDER},
-      {"back", X_INPUT_GAMEPAD_BACK},
-      {"start", X_INPUT_GAMEPAD_START},
-      {"ls", X_INPUT_GAMEPAD_LEFT_THUMB},
-      {"rs", X_INPUT_GAMEPAD_RIGHT_THUMB},
-      {"dpad_up", X_INPUT_GAMEPAD_DPAD_UP},
-      {"dpad_down", X_INPUT_GAMEPAD_DPAD_DOWN},
-      {"dpad_left", X_INPUT_GAMEPAD_DPAD_LEFT},
-      {"dpad_right", X_INPUT_GAMEPAD_DPAD_RIGHT},
-  };
-  uint16_t bits = 0;
-  while (!list.empty()) {
-    size_t comma = list.find(',');
-    std::string_view name = list.substr(0, comma);
-    while (!name.empty() && name.front() == ' ')
-      name.remove_prefix(1);
-    while (!name.empty() && name.back() == ' ')
-      name.remove_suffix(1);
-    for (const Name& n : kNames) {
-      if (name.size() == n.name.size() &&
-          std::equal(name.begin(), name.end(), n.name.begin(), [](char a, char b) {
-            return std::tolower(static_cast<unsigned char>(a)) == b;
-          })) {
-        bits |= n.bit;
-      }
-    }
-    if (comma == std::string_view::npos)
-      break;
-    list.remove_prefix(comma + 1);
-  }
-  return bits;
-}
-
-}  // namespace
 
 uint16_t MnkInputDriver::ApplyTapLocked(uint16_t buttons) {
-  uint16_t target = ControlBits(REXCVAR_GET(mnk_tap_target));
-  uint16_t sources = ControlBits(REXCVAR_GET(mnk_tap_sources)) & ~target;
-  if (!target || !sources) {
-    tap_previous_ = tap_pending_mask_ = tap_active_mask_ = 0;
-    tap_pending_ = false;
-    return buttons;
-  }
-  // The game's gate closed: no press is a tap, and the sources held are not new when it opens.
-  bool (*gate)() = g_tap_gate.load(std::memory_order_acquire);
-  if (gate && !gate()) {
-    tap_previous_ = buttons & sources;
-    tap_pending_mask_ = tap_active_mask_ = 0;
-    tap_pending_ = false;
-    return buttons;
-  }
-  using Clock = std::chrono::steady_clock;
-  // The target released between two presses: a game that reads the pad once a frame (16.7 ms at 60
-  // FPS) sees it.
-  constexpr auto kReleased = std::chrono::milliseconds(20);
-  auto now = Clock::now();
-  uint16_t pressed = buttons & sources;
-  uint16_t newly = pressed & ~tap_previous_;
-  tap_previous_ = pressed;
-  // A source pressed: the first opens the window in which the others join the same press (a chord
-  // pressed a few milliseconds apart).
-  if (newly) {
-    if (!tap_pending_) {
-      tap_pending_ = true;
-      tap_first_ = now;
-      tap_pending_mask_ = 0;
-    }
-    tap_pending_mask_ |= newly;
-  }
-  auto window = std::chrono::milliseconds(std::max(0, REXCVAR_GET(mnk_tap_window_ms)));
-  if (tap_pending_ && now - tap_first_ >= window && now >= tap_ready_) {
-    tap_pending_ = false;
-    tap_active_mask_ = tap_pending_mask_;
-    tap_until_ = now + std::chrono::milliseconds(std::max(1, REXCVAR_GET(mnk_tap_hold_ms)));
-    tap_ready_ = tap_until_ + kReleased;
-  }
-  // While the target is pressed, the sources of its press stay pressed too: a key tapped and
-  // released within the window still reaches the game with its strum.
-  if (now < tap_until_) {
-    buttons |= target | tap_active_mask_;
-  }
-  return buttons;
+  return tap_.Apply(buttons, TapControlBits(REXCVAR_GET(mnk_tap_target)),
+                    TapControlBits(REXCVAR_GET(mnk_tap_sources)), REXCVAR_GET(mnk_tap_window_ms),
+                    REXCVAR_GET(mnk_tap_hold_ms));
 }
 
 X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {

@@ -19,3 +19,5 @@ REXCVAR_DECLARE(std::string, input_backend);
 REXCVAR_DECLARE(bool, vibration);
 REXCVAR_DECLARE(double, left_stick_deadzone_percentage);
 REXCVAR_DECLARE(double, right_stick_deadzone_percentage);
+REXCVAR_DECLARE(int32_t, mnk_tap_window_ms);
+REXCVAR_DECLARE(int32_t, mnk_tap_hold_ms);

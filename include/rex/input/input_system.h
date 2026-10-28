@@ -14,6 +14,7 @@
 #include <atomic>
 #include <bitset>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -23,6 +24,7 @@
 #include <rex/input/input.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/state_merge.h>
+#include <rex/input/tap_strum.h>
 #include <rex/system/interfaces/input.h>
 
 namespace rex::ui {
@@ -100,6 +102,10 @@ class InputSystem : public system::IInputSystem {
   /// SetPrimaryPressWindow's swap: the user's controller becomes user 0's and user 0's takes its user.
   bool MakePrimary(uint32_t user_index);
   void AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const;
+  /// A gamepad, or the keyboard's pad, that the game is told is a guitar, read as one: its whammy bar at rest while
+  /// the right stick is (gamepad_whammy_rest), and its frets strumming as they are pressed (gamepad_tap_target).
+  /// True when its right stick's X is then a whammy bar at rest at -32768 (a real guitar's too), for the merge.
+  bool PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad);
   X_INPUT_VIBRATION ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const;
 
   rex::ui::Window* window_ = nullptr;
@@ -122,6 +128,10 @@ class InputSystem : public system::IInputSystem {
   std::atomic<int> ui_input_blockers_{0};
   // Masked out per user until the guest sees them released.
   std::array<uint16_t, kMaxGuestUsers> consumed_buttons_ = {};
+
+  // gamepad_tap_target's, per gamepad.
+  std::mutex pad_taps_mutex_;
+  std::map<DeviceId, TapStrum> pad_taps_;
 
   std::mutex host_filter_mutex_;
   HostInputFilter host_filter_;
