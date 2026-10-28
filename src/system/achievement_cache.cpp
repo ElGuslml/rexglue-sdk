@@ -116,6 +116,11 @@ void WriteAchievementCache(const util::XdbfGameData& db, uint32_t title_id, XLan
   const XLanguage loaded = db.GetExistingLanguage(loaded_language);
   auto key = [](XLanguage language) { return kLanguageKeys[uint32_t(language)]; };
 
+  // The title's own icon: the XDBF's image 0x8000, the one the console's dashboard shows.
+  if (auto title_icon = db.icon(); title_icon && title_icon.size > 0) {
+    WriteIfChanged(icon_dir / "title.png", title_icon.buffer, title_icon.size);
+  }
+
   std::string content = fmt::format(
       "# The achievements of title {}, for launchers: written by the ReXGlue runtime (recomp branch, RECOMP.md)\n"
       "# when it loads them, if they changed. The unlocks are in {}.toml, the icons in the folder {}.\n\n",

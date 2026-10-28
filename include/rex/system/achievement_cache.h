@@ -24,7 +24,8 @@ namespace rex::system {
 //   icon, and label, description and unachieved description in every language the XDBF has (keys en, ja, de, fr,
 //   es, it, ko, zh-Hant, pt, zh-Hans, pl, ru). Texts that achievements.toml overrode replace the XDBF's in the
 //   language they were loaded in (`loaded_language`);
-// - <dir>/<TITLEID>/<image_id>.png: the icons, the XDBF's images as they are (PNG).
+// - <dir>/<TITLEID>/<image_id>.png: the icons, the XDBF's images as they are (PNG);
+// - <dir>/<TITLEID>/title.png: the title's own icon, the XDBF's image 0x8000 (the dashboard's), as it is.
 // --achievements_cache_only (ReXApp) writes them and exits, for a launcher that has just installed the game.
 void WriteAchievementCache(const util::XdbfGameData& db, uint32_t title_id, XLanguage loaded_language,
                            const std::vector<AchievementInfo>& achievements, const std::filesystem::path& dir);
