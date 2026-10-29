@@ -90,7 +90,7 @@ class InputSystem : public system::IInputSystem {
  private:
   using JoystickValue = std::pair<uint16_t, uint16_t>;
   /// Re-enumerates every driver and notifies the assignment when the set
-  /// changed.
+  /// changed. Called with mutex_ held, as are the helpers below.
   void RefreshDevices();
   InputDriver* DriverForDevice(DeviceId id);
   const DeviceInfo* DeviceInfoFor(DeviceId id) const;
@@ -111,6 +111,12 @@ class InputSystem : public system::IInputSystem {
   rex::ui::Window* window_ = nullptr;
 
   std::vector<std::unique_ptr<InputDriver>> drivers_;
+
+  // The guest reads the controllers on several threads (XamInputGetState on one, a sign-in check that looks for a
+  // guest's controller or a vibration on another) and the quit prompt on the UI thread, and every read enumerates the
+  // devices again (RefreshDevices). This guards the device list, the assignment and the users' state below; it is
+  // recursive because GetState reads through GetStateForUI. Taken before a driver's own locks.
+  std::recursive_mutex mutex_;
 
   std::unique_ptr<DeviceAssignment> assignment_;
   ActiveDeviceTracker active_devices_;

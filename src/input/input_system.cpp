@@ -204,6 +204,7 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
 }
 
 void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
+  std::lock_guard lock(mutex_);
   assignment_ = std::move(assignment);
   if (assignment_) {
     assignment_->OnDevicesChanged(devices_);
@@ -339,6 +340,7 @@ DeviceId InputSystem::ChooseDeviceForUser(uint32_t user_index) const {
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
   SCOPE_profile_cpu_f("hid");
+  std::lock_guard lock(mutex_);
   if (!out_caps || !assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -437,6 +439,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
     return X_ERROR_SUCCESS;
   }
 
+  std::unique_lock lock(mutex_);
   X_RESULT result = GetStateForUI(user_index, out_state);
 
   // SetPrimaryPressWindow: a new press on another user's controller makes it user 0's. This read sees that user's
@@ -462,17 +465,20 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   }
 
   // A host UI watching the guest's reads (SetHostInputFilter) can take this one: the guest reads the pad at rest,
-  // and the buttons held stay masked until released.
+  // and the buttons held stay masked until released. The filter runs unlocked, as it may open a dialog that reads
+  // the controllers on the UI thread.
+  lock.unlock();
   if (result == X_ERROR_SUCCESS && out_state) {
     bool take = false;
     {
-      std::lock_guard lock(host_filter_mutex_);
+      std::lock_guard filter_lock(host_filter_mutex_);
       if (host_filter_) {
         take = host_filter_(user_index, out_state->gamepad);
       }
     }
     if (take) {
       if (user_index < kMaxGuestUsers) {
+        std::lock_guard consumed_lock(mutex_);
         consumed_buttons_[user_index] |= static_cast<uint16_t>(out_state->gamepad.buttons);
       }
       std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
@@ -484,6 +490,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 
 X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
+  std::lock_guard lock(mutex_);
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -546,6 +553,7 @@ void InputSystem::AddUIInputBlocker() {
 void InputSystem::RemoveUIInputBlocker() {
   // Whatever is held right now stays masked until released, so the press that
   // dismissed the dialog is not also read as a press in the game.
+  std::lock_guard lock(mutex_);
   X_INPUT_STATE state = {};
   for (uint32_t user_index = 0; user_index < kMaxGuestUsers; user_index++) {
     if (GetStateForUI(user_index, &state) == X_ERROR_SUCCESS) {
@@ -566,10 +574,12 @@ void InputSystem::SetPrimaryPressWindow(bool open) {
     return;
   }
   // Opening: whatever is held now is not a new press until it is released.
+  std::lock_guard lock(mutex_);
   window_buttons_.fill(0xFFFF);
 }
 
 bool InputSystem::UserHasDevice(uint32_t user_index) {
+  std::lock_guard lock(mutex_);
   if (!assignment_ || user_index >= kMaxGuestUsers) {
     return false;
   }
@@ -702,6 +712,7 @@ X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(const X_INPUT_VIBRATION* vib
 
 X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
   SCOPE_profile_cpu_f("hid");
+  std::lock_guard lock(mutex_);
   if (!assignment_ || !vibration) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -752,6 +763,7 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
   if (ui_input_blockers_.load() > 0) {
     return X_ERROR_EMPTY;
   }
+  std::lock_guard lock(mutex_);
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
