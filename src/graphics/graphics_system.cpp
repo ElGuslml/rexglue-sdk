@@ -12,11 +12,17 @@
 #include <rex/graphics/graphics_system.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <utility>
 
 #include <rex/cvar.h>
@@ -24,6 +30,7 @@
 #include <rex/graphics/flags.h>
 #include <rex/kernel/xboxkrnl/video.h>
 #include <rex/logging.h>
+#include <rex/runtime.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
@@ -31,9 +38,21 @@
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
+#if REX_PLATFORM_WIN32
+#include <dxgi.h>
+#include <wrl/client.h>
+#endif
+
 REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
     .allowed({"none", "fxaa", "fxaa_extreme"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_BOOL(vblank_follows_display, false, "GPU",
+                    "With vsync, the emulated vertical blank follows the display's (Windows: the monitor the "
+                    "window is on) while video_mode_refresh_rate is within 2 % of its refresh rate or of a whole "
+                    "fraction of it: the game's frames in step with the display's refreshes, where a timer's rate "
+                    "drifts from them (a frame dropped or shown twice every few seconds). The timer otherwise, and "
+                    "while the display gives no vertical blank");
 
 REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
                     "Store shaders persistently and load them when loading games to avoid "
@@ -56,6 +75,184 @@ rex::graphics::CommandProcessor::SwapPostEffect ParseSwapPostEffect(
   }
   return rex::graphics::CommandProcessor::SwapPostEffect::kNone;
 }
+
+#if REX_PLATFORM_WIN32
+// vblank_follows_display: the vertical blanks of the monitor the game's window is on. A thread waits for them
+// (IDXGIOutput::WaitForVBlank, as the presenter's UI ticks do) and counts them; the vblank worker waits for that
+// count with a timeout, so a display that stops signalling (asleep, unplugged) leaves the timer in charge.
+class DisplayVblank {
+ public:
+  DisplayVblank() : thread_([this] { Run(); }) {}
+  ~DisplayVblank() {
+    {
+      std::scoped_lock lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    thread_.join();
+  }
+
+  // About once a second: the window's monitor, its refresh rate, and how many of its vertical blanks make one of
+  // the guest's (0: they do not fit, within 2 %, and the timer keeps the guest's rate).
+  void Update(double guest_hz) {
+    HWND hwnd = nullptr;
+    if (rex::Runtime* runtime = rex::Runtime::instance()) {
+      if (rex::ui::Window* window = runtime->display_window()) {
+        hwnd = static_cast<HWND>(window->GetNativeWindowHandle());
+      }
+    }
+    HMONITOR monitor = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) : nullptr;
+    MONITORINFOEXW info = {};
+    info.cbSize = sizeof(info);
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    uint32_t hz = 0;
+    if (monitor && GetMonitorInfoW(monitor, &info) &&
+        EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1) {
+      hz = mode.dmDisplayFrequency;
+    }
+    uint32_t divisor = hz ? uint32_t(std::lround(hz / guest_hz)) : 0;
+    if (divisor && std::abs(double(hz) / divisor - guest_hz) > 0.02 * guest_hz) {
+      divisor = 0;
+    }
+    std::scoped_lock lock(mutex_);
+    if (monitor != monitor_ || hz != hz_) {
+      variable_ = false;
+      intervals_filled_ = 0;
+    }
+    // Followed, a variable refresh rate display (G-Sync, FreeSync) refreshes when the game's frame arrives, and the
+    // game waits for that refresh to start the next: each frame would take its render time plus a refresh. Its
+    // vertical blanks then come well apart from the period of its rate; the timer is kept for this display.
+    if (output_ && divisor_ && !variable_ && intervals_filled_ == intervals_.size()) {
+      std::array<int64_t, 64> sorted = intervals_;
+      std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+      const int64_t median = sorted[sorted.size() / 2];
+      if (median > period_.count() * 115 / 100) {
+        variable_ = true;
+        REXLOG_INFO("[vblank] the display's vertical blanks come every {:.2f} ms, not {:.2f}: a variable refresh rate",
+                    median / 1e6, period_.count() / 1e6);
+      }
+    }
+    if (variable_) {
+      divisor = 0;
+    }
+    if (monitor != monitor_ || (divisor && !output_)) {
+      output_.Reset();
+      intervals_filled_ = 0;
+      if (monitor && divisor) {
+        if (!factory_ || !factory_->IsCurrent()) {
+          factory_.Reset();
+          CreateDXGIFactory1(IID_PPV_ARGS(&factory_));
+        }
+        output_ = factory_ ? OutputForMonitor(factory_.Get(), monitor) : nullptr;
+      }
+    }
+    if (!divisor) {
+      output_.Reset();
+    }
+    const uint32_t following = output_ ? divisor : 0;
+    if (monitor != monitor_ || hz != hz_ || following != divisor_) {
+      if (following) {
+        std::string device;
+        for (const wchar_t* c = info.szDevice; *c; ++c) {
+          device += char(*c);  // "\\.\DISPLAY1"
+        }
+        REXLOG_INFO("[vblank] following the display's vertical blank: {} at {} Hz, one in {} for {:.0f} Hz", device,
+                    hz, following, guest_hz);
+      } else {
+        REXLOG_INFO("[vblank] the timer at {:.0f} Hz: the display {} Hz {}", guest_hz, hz,
+                    variable_  ? "follows the game's frames"
+                    : divisor ? "gives no vertical blank to wait for"
+                              : "is not a whole multiple of it");
+      }
+    }
+    monitor_ = monitor;
+    hz_ = hz;
+    divisor_ = following;
+    period_ = hz ? std::chrono::nanoseconds(int64_t(1e9 / hz)) : std::chrono::nanoseconds(0);
+    cv_.notify_all();
+  }
+
+  uint32_t divisor() const { return divisor_; }
+  std::chrono::nanoseconds period() const { return period_; }
+
+  // Waits up to `timeout` for the display's vertical blanks since the previous call: how many (0 on a timeout).
+  uint64_t Wait(std::chrono::nanoseconds timeout) {
+    std::unique_lock lock(mutex_);
+    cv_.wait_for(lock, timeout, [this] { return count_ != seen_ || stop_; });
+    const uint64_t blanks = count_ - seen_;
+    seen_ = count_;
+    return blanks;
+  }
+
+ private:
+  static Microsoft::WRL::ComPtr<IDXGIOutput> OutputForMonitor(IDXGIFactory1* factory, HMONITOR monitor) {
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    for (UINT a = 0; SUCCEEDED(factory->EnumAdapters(a, adapter.ReleaseAndGetAddressOf())); ++a) {
+      Microsoft::WRL::ComPtr<IDXGIOutput> output;
+      for (UINT o = 0; SUCCEEDED(adapter->EnumOutputs(o, output.ReleaseAndGetAddressOf())); ++o) {
+        DXGI_OUTPUT_DESC desc;
+        if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor) {
+          return output;
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  void Run() {
+    std::unique_lock lock(mutex_);
+    while (!stop_) {
+      Microsoft::WRL::ComPtr<IDXGIOutput> output = output_;
+      if (!output) {
+        cv_.wait_for(lock, std::chrono::milliseconds(100));
+        continue;
+      }
+      lock.unlock();
+      const bool waited = SUCCEEDED(output->WaitForVBlank());
+      const auto now = std::chrono::steady_clock::now();
+      lock.lock();
+      if (!waited) {
+        if (output_ == output) {
+          output_.Reset();  // found again by the next Update
+        }
+        continue;
+      }
+      // A return well before a refresh period is not a vertical blank (a display that is off may not wait at all).
+      if (now - last_ >= period_ / 2) {
+        intervals_[intervals_next_] = std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_).count();
+        intervals_next_ = (intervals_next_ + 1) % intervals_.size();
+        intervals_filled_ = std::min(intervals_filled_ + 1, intervals_.size());
+        last_ = now;
+        ++count_;
+        cv_.notify_all();
+      } else {
+        cv_.wait_for(lock, std::chrono::milliseconds(1));
+      }
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory_;
+  Microsoft::WRL::ComPtr<IDXGIOutput> output_;
+  HMONITOR monitor_ = nullptr;
+  uint32_t hz_ = 0;
+  uint32_t divisor_ = 0;
+  std::chrono::nanoseconds period_{0};
+  uint64_t count_ = 0;
+  uint64_t seen_ = 0;
+  std::chrono::steady_clock::time_point last_;
+  // The intervals between the last vertical blanks counted (nanoseconds), and whether they showed a variable
+  // refresh rate display.
+  std::array<int64_t, 64> intervals_{};
+  size_t intervals_next_ = 0;
+  size_t intervals_filled_ = 0;
+  bool variable_ = false;
+  std::thread thread_;
+};
+#endif  // REX_PLATFORM_WIN32
 }  // namespace
 
 namespace rex::graphics {
@@ -158,7 +355,48 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+#if REX_PLATFORM_WIN32
+        // vblank_follows_display: the display's vertical blanks while they fit the guest's rate; the timer below
+        // otherwise, and for a second after the display gave none within three of its periods.
+        std::optional<DisplayVblank> display;
+        auto display_checked = std::chrono::steady_clock::time_point{};
+        auto display_timer_until = std::chrono::steady_clock::time_point{};
+        bool display_drain = true;
+        uint64_t display_blanks = 0;
+#endif
         while (vsync_worker_running_) {
+#if REX_PLATFORM_WIN32
+          if (REXCVAR_GET(vsync) && REXCVAR_GET(vblank_follows_display)) {
+            if (!display) {
+              display.emplace();
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now - display_checked >= std::chrono::seconds(1)) {
+              display_checked = now;
+              display->Update(refresh_rate_hz);
+            }
+            if (display->divisor() && now >= display_timer_until) {
+              if (display_drain) {
+                display->Wait(std::chrono::nanoseconds(0));  // the blanks counted while the timer ran
+                display_drain = false;
+              }
+              if (uint64_t blanks = display->Wait(3 * display->period())) {
+                for (display_blanks += blanks; display_blanks >= display->divisor();
+                     display_blanks -= display->divisor()) {
+                  MarkVblank();
+                }
+                last_frame_time = chrono::Clock::QueryGuestTickCount();
+                continue;
+              }
+              REXLOG_WARN("[vblank] no vertical blank from the display in {} ms: the timer for a second",
+                          3 * display->period().count() / 1000000);
+              display_timer_until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            }
+            display_drain = true;
+          } else if (display) {
+            display.reset();
+          }
+#endif
           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
           uint64_t interval_ticks =
               REXCVAR_GET(vsync) ? vsync_interval_ticks : no_vsync_interval_ticks;
