@@ -130,14 +130,19 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
       // once (the semaphore it took for this one, given back).
       const uint32_t owed = owed_frames_.fetch_sub(1, std::memory_order_relaxed) - 1;
       ++dropped_frames_;
+      const uint32_t dropped = owed ? 0 : dropped_frames_;
       if (!owed) {
-        REXAPU_INFO("audio_keep_time: {} frames ({} ms) of the game's sound dropped for the silence played while it "
-                    "came late",
-                    dropped_frames_, dropped_frames_ * channel_samples_ * 1000 / frame_frequency_);
         dropped_frames_ = 0;
       }
       guard.unlock();
       semaphore_->Release(1, nullptr);
+      // Logged outside the lock: the log writes its file in the caller's thread, and the device's callback waits
+      // for the lock.
+      if (dropped) {
+        REXAPU_INFO("audio_keep_time: {} frames ({} ms) of the game's sound dropped for the silence played while it "
+                    "came late",
+                    dropped, dropped * channel_samples_ * 1000 / frame_frequency_);
+      }
       return;
     }
   }
