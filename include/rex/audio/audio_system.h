@@ -106,4 +106,8 @@ class AudioSystem : public system::IAudioSystem {
   std::unique_ptr<rex::thread::Event> resume_event_;
 };
 
+// With audio_thread_priority, puts the calling thread (one of the SDK's audio threads, named `what` in the log) in
+// Windows' multimedia class "Pro Audio", as the sound device's own thread is, or else at the highest priority.
+void RaiseAudioThreadPriority(const char* what);
+
 }  // namespace rex::audio

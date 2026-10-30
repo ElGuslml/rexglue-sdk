@@ -10,6 +10,7 @@
  */
 
 #include <rex/audio/xma/context.h>
+#include <rex/audio/audio_system.h>
 #include <rex/audio/xma/decoder.h>
 #include <rex/cvar.h>
 #include <rex/dbg.h>
@@ -138,6 +139,7 @@ X_STATUS XmaDecoder::Setup(system::KernelState* kernel_state) {
 }
 
 void XmaDecoder::WorkerThreadMain() {
+  RaiseAudioThreadPriority("XMA decoder");
   while (worker_running_) {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;

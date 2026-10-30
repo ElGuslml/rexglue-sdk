@@ -24,6 +24,11 @@
 #include <rex/system/thread_state.h>
 #include <rex/thread.h>
 #include <rex/cvar.h>
+#include <rex/platform.h>
+
+#if REX_PLATFORM_WIN32
+#include <windows.h>
+#endif
 
 REXCVAR_DEFINE_INT32(
     audio_maxqframes, 8, "Audio",
@@ -34,6 +39,12 @@ REXCVAR_DEFINE_INT32(audio_callback_min_interval_us, 0, "Audio",
                      "(0 = as soon as a frame is free). The console calls it every 5333 us; the host "
                      "device frees frames in bursts")
     .range(0, 5000);
+
+REXCVAR_DEFINE_BOOL(audio_thread_priority, false, "Audio",
+                    "The SDK's audio threads (the audio worker, which runs the game's sound callback, and the XMA "
+                    "decoder) in Windows' multimedia class \"Pro Audio\", as the sound device's own thread: a busy "
+                    "PC holds them up less, and their lateness is what leaves the sound behind (silence, lost "
+                    "blocks). Off: normal priority");
 
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
@@ -105,7 +116,30 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
   return X_STATUS_SUCCESS;
 }
 
+void RaiseAudioThreadPriority(const char* what) {
+  if (!REXCVAR_GET(audio_thread_priority)) {
+    return;
+  }
+#if REX_PLATFORM_WIN32
+  using SetCharacteristics = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+  static const auto set_characteristics = [] {
+    HMODULE avrt = LoadLibraryW(L"avrt.dll");
+    return avrt ? reinterpret_cast<SetCharacteristics>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW"))
+                : nullptr;
+  }();
+  DWORD task = 0;
+  if (set_characteristics && set_characteristics(L"Pro Audio", &task)) {
+    REXAPU_INFO("audio_thread_priority: the {} thread in the multimedia class \"Pro Audio\"", what);
+  } else if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)) {
+    REXAPU_INFO("audio_thread_priority: the {} thread at the highest priority (no multimedia class)", what);
+  } else {
+    REXAPU_WARN("audio_thread_priority: the {} thread's priority could not be raised", what);
+  }
+#endif
+}
+
 void AudioSystem::WorkerThreadMain() {
+  RaiseAudioThreadPriority("audio worker");
   // Initialize driver and ringbuffer.
   Initialize();
 
