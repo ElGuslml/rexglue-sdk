@@ -25,8 +25,20 @@
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+REXCVAR_DEFINE_BOOL(audio_keep_time, false, "Audio",
+                    "The sound keeps real time when the game's audio comes late: each frame of silence the device "
+                    "played for want of the game's (its audio thread held up longer than the queue lasts) is made up "
+                    "by dropping one of the game's next frames, a short skip instead of the sound staying that much "
+                    "behind (a music game's notes do not wait). Off: the silence delays the rest of the sound");
 
 namespace rex::audio::sdl {
+
+namespace {
+// The most frames of silence made up at once (2 s): a longer wait is not caught up beyond it.
+constexpr uint32_t kMaxOwedFrames = 375;
+// Silence counts only while the client submits: within this of its last frame.
+constexpr auto kClientActive = std::chrono::milliseconds(500);
+}  // namespace
 
 SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
     : AudioDriver(memory), semaphore_(semaphore) {}
@@ -110,6 +122,25 @@ bool SDLAudioDriver::Initialize() {
 }
 
 void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+  if (REXCVAR_GET(audio_keep_time)) {
+    std::unique_lock<std::mutex> guard(frames_mutex_);
+    last_submit_ = std::chrono::steady_clock::now();
+    if (owed_frames_.load(std::memory_order_relaxed)) {
+      // The device already played silence in this frame's time: dropped, and the client asked for the next one at
+      // once (the semaphore it took for this one, given back).
+      const uint32_t owed = owed_frames_.fetch_sub(1, std::memory_order_relaxed) - 1;
+      ++dropped_frames_;
+      if (!owed) {
+        REXAPU_INFO("audio_keep_time: {} frames ({} ms) of the game's sound dropped for the silence played while it "
+                    "came late",
+                    dropped_frames_, dropped_frames_ * channel_samples_ * 1000 / frame_frequency_);
+        dropped_frames_ = 0;
+      }
+      guard.unlock();
+      semaphore_->Release(1, nullptr);
+      return;
+    }
+  }
   const auto input_frame = memory_->TranslateVirtual<float*>(frame_ptr);
   float* output_frame;
   {
@@ -190,6 +221,12 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       if (!SDL_PutAudioStreamData(stream, data, len)) {
         REXAPU_ERROR("SDL_PutAudioStreamData() failed while filling silence: {}", SDL_GetError());
         break;
+      }
+      // audio_keep_time: while the client submits, this silence is time its sound must make up.
+      if (REXCVAR_GET(audio_keep_time) && driver->last_submit_ != std::chrono::steady_clock::time_point{} &&
+          std::chrono::steady_clock::now() - driver->last_submit_ < kClientActive &&
+          driver->owed_frames_.load(std::memory_order_relaxed) < kMaxOwedFrames) {
+        driver->owed_frames_.fetch_add(1, std::memory_order_relaxed);
       }
       additional_amount -= len;
     } else {

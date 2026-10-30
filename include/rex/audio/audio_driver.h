@@ -23,6 +23,10 @@ class AudioDriver {
 
   virtual void SubmitFrame(uint32_t samples_ptr) = 0;
 
+  // The device played silence for want of the client's frames, and as many of the client's next frames are dropped
+  // to catch up (audio_keep_time): the client is called for them without the usual spacing.
+  virtual bool CatchingUp() const { return false; }
+
  protected:
   inline uint8_t* TranslatePhysical(uint32_t guest_address) const {
     return memory_->TranslatePhysical(guest_address);

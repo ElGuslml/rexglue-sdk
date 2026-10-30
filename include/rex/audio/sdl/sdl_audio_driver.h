@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <queue>
 #include <stack>
@@ -29,6 +31,7 @@ class SDLAudioDriver : public AudioDriver {
 
   bool Initialize();
   void SubmitFrame(uint32_t frame_ptr) override;
+  bool CatchingUp() const override { return owed_frames_.load(std::memory_order_relaxed) != 0; }
   void Shutdown();
 
  protected:
@@ -49,6 +52,12 @@ class SDLAudioDriver : public AudioDriver {
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
+
+  // audio_keep_time: frames of silence played for want of the client's (while it submits), each owing one of its
+  // next frames to drop; the frames dropped so far in this catch-up; the client's last frame.
+  std::atomic<uint32_t> owed_frames_{0};
+  uint32_t dropped_frames_ = 0;
+  std::chrono::steady_clock::time_point last_submit_ = {};
 };
 
 }  // namespace rex::audio::sdl

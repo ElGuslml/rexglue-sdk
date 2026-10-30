@@ -146,6 +146,8 @@ void AudioSystem::WorkerThreadMain() {
       auto global_lock = global_critical_region_.Acquire();
       uint32_t client_callback = clients_[index].callback;
       uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
+      // Frames owed for silence the device played (audio_keep_time) are made as fast as the client can.
+      const bool catching_up = clients_[index].driver && clients_[index].driver->CatchingUp();
       global_lock.unlock();
 
       if (client_callback) {
@@ -154,7 +156,9 @@ void AudioSystem::WorkerThreadMain() {
                        client_callback, client_callback_arg, index);
         }
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
-        PaceClientCallback(index);
+        if (!catching_up) {
+          PaceClientCallback(index);
+        }
         uint64_t args[] = {client_callback_arg};
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
