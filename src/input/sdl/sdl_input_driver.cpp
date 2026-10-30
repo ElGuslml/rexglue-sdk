@@ -13,6 +13,7 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -34,6 +35,11 @@ REXCVAR_DEFINE_STRING(gamepad_remap, "", "Input",
                       "guide; input is the controller's south east west north lb rb lt rt ls rs start back guide "
                       "dpup dpdown dpleft dpright misc1-6 paddle1-4 touchpad, alternatives joined by '|'. Empty: "
                       "the standard layout. Example: 'ps5:a=east,b=south'");
+REXCVAR_DEFINE_STRING(gamepad_device_remap, "", "Input",
+                      "As gamepad_remap, for particular controllers, applied after it: sections "
+                      "'controller:control=input,...' joined by ';', a controller named by its serial number or "
+                      "else its SDL GUID (as the log's OnControllerDeviceAdded lines give them). A launcher writes "
+                      "it");
 REXCVAR_DEFINE_BOOL(
     guitar_whammy_rest, false, "Input",
     "A guitar's whammy bar (the right stick's X axis) is at rest, -32768, until the guitar "
@@ -150,9 +156,42 @@ bool EqualsCI(std::string_view a, std::string_view b) {
          });
 }
 
+// Moves the controls a section lists ("control=input|input,...") onto their inputs.
+void ApplySection(std::string_view entries, std::array<uint64_t, SDLInputDriver::kRemapControls>& sources) {
+  ForEachPiece(entries, ',', [&](std::string_view entry) {
+    size_t equals = entry.find('=');
+    if (entry.empty() || equals == std::string_view::npos) {
+      return;
+    }
+    std::string_view control = Trim(entry.substr(0, equals));
+    auto c = std::find_if(std::begin(kControlNames), std::end(kControlNames),
+                          [&](const char* name) { return EqualsCI(control, name); });
+    if (c == std::end(kControlNames)) {
+      REXLOG_WARN("gamepad_remap: unknown control '{}'", control);
+      return;
+    }
+    uint64_t mask = 0;
+    ForEachPiece(entry.substr(equals + 1), '|', [&](std::string_view input) {
+      if (input.empty()) {
+        return;  // "a=": the control is not on the controller at all
+      }
+      auto i = std::find_if(std::begin(kInputNames), std::end(kInputNames),
+                            [&](const InputName& n) { return EqualsCI(input, n.name); });
+      if (i == std::end(kInputNames)) {
+        REXLOG_WARN("gamepad_remap: unknown input '{}'", input);
+        return;
+      }
+      mask |= Bit(i->input);
+    });
+    sources[size_t(c - std::begin(kControlNames))] = mask;
+  });
+}
+
 // The sources of each control for a controller of `type`: the standard layout, then gamepad_remap's '*'
-// sections, then the sections for this type. `changes` lists what differs from the standard layout.
-std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType type, std::string& changes) {
+// sections, then the sections for this type, then gamepad_device_remap's section for this controller (its serial
+// number's, else its GUID's). `changes` lists what differs from the standard layout.
+std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType type, std::string_view serial,
+                                                               std::string_view guid, std::string& changes) {
   std::array<uint64_t, SDLInputDriver::kRemapControls> sources = kDefaultSources;
   const std::string& text = REXCVAR_GET(gamepad_remap);
   const char* type_name = SDL_GetGamepadStringForType(type);
@@ -167,34 +206,25 @@ std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType ty
       if (!match) {
         return;
       }
-      ForEachPiece(section.substr(colon + 1), ',', [&](std::string_view entry) {
-        size_t equals = entry.find('=');
-        if (entry.empty() || equals == std::string_view::npos) {
-          return;
-        }
-        std::string_view control = Trim(entry.substr(0, equals));
-        auto c = std::find_if(std::begin(kControlNames), std::end(kControlNames),
-                              [&](const char* name) { return EqualsCI(control, name); });
-        if (c == std::end(kControlNames)) {
-          REXLOG_WARN("gamepad_remap: unknown control '{}'", control);
-          return;
-        }
-        uint64_t mask = 0;
-        ForEachPiece(entry.substr(equals + 1), '|', [&](std::string_view input) {
-          if (input.empty()) {
-            return;  // "a=": the control is not on the controller at all
-          }
-          auto i = std::find_if(std::begin(kInputNames), std::end(kInputNames),
-                                [&](const InputName& n) { return EqualsCI(input, n.name); });
-          if (i == std::end(kInputNames)) {
-            REXLOG_WARN("gamepad_remap: unknown input '{}'", input);
-            return;
-          }
-          mask |= Bit(i->input);
-        });
-        sources[size_t(c - std::begin(kControlNames))] = mask;
-      });
+      ApplySection(section.substr(colon + 1), sources);
     });
+  }
+  // A controller's name is cut at its section's last ':' (the entries have none; a serial number may).
+  std::optional<std::string_view> by_serial, by_guid;
+  ForEachPiece(REXCVAR_GET(gamepad_device_remap), ';', [&](std::string_view section) {
+    size_t colon = section.rfind(':');
+    if (colon == std::string_view::npos) {
+      return;
+    }
+    std::string_view controller = Trim(section.substr(0, colon));
+    if (!serial.empty() && EqualsCI(controller, serial)) {
+      by_serial = section.substr(colon + 1);
+    } else if (!guid.empty() && EqualsCI(controller, guid)) {
+      by_guid = section.substr(colon + 1);
+    }
+  });
+  if (by_serial || by_guid) {
+    ApplySection(by_serial ? *by_serial : *by_guid, sources);
   }
   for (int c = 0; c < SDLInputDriver::kRemapControls; ++c) {
     if (sources[c] == kDefaultSources[c]) {
@@ -804,9 +834,10 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
   state.id = AllocateDeviceId();
   state.state_changed = true;  // XInput starts with packet_number = 1
   std::string remap_changes;
-  state.sources = RemapFor(SDL_GetGamepadType(controller), remap_changes);
+  const char* serial = SDL_GetGamepadSerial(controller);
+  state.sources = RemapFor(SDL_GetGamepadType(controller), serial ? serial : "", guid_text, remap_changes);
   if (!remap_changes.empty()) {
-    REXLOG_INFO("SDL OnControllerDeviceAdded: gamepad_remap for {}: {}",
+    REXLOG_INFO("SDL OnControllerDeviceAdded: gamepad_remap for {} (gamepad_device_remap for this one included): {}",
                 SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
   }
   UpdateXCapabilities(state);
