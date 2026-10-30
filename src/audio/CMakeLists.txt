@@ -16,6 +16,11 @@ add_library(rexaudio OBJECT
     sdl/sdl_audio_system.cpp
     sdl/sdl_audio_driver.cpp
 )
+if(WIN32)
+    # WASAPI in exclusive mode (audio_wasapi_exclusive)
+    target_sources(rexaudio PRIVATE wasapi/wasapi_exclusive_driver.cpp)
+    target_link_libraries(rexaudio PRIVATE ole32)
+endif()
 add_library(rex::audio ALIAS rexaudio)
 
 rex_target_pch(rexaudio

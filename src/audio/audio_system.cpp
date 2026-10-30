@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+
 #include <rex/assert.h>
 #include <rex/audio/audio_driver.h>
 #include <rex/audio/audio_system.h>
@@ -309,15 +311,16 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
                queued_frames_);
 
   auto client_semaphore = client_semaphores_[index].get();
-  auto ret = client_semaphore->Release(queued_frames_, nullptr);
-  assert_true(ret);
-
   AudioDriver* driver;
   auto result = CreateDriver(index, client_semaphore, &driver);
   if (XFAILED(result)) {
     return result;
   }
   assert_not_null(driver);
+  // The frames the client may be ahead of the device: the semaphore's count (its maximum stays queued_frames_). An
+  // exclusive output, which takes them steadily, may ask for fewer (audio_wasapi_exclusive_queue).
+  auto ret = client_semaphore->Release(std::clamp(driver->QueuedFrames(queued_frames_), 1u, queued_frames_), nullptr);
+  assert_true(ret);
 
   uint32_t ptr = memory()->SystemHeapAlloc(0x4);
   memory::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
