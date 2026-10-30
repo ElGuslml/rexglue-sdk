@@ -9,8 +9,12 @@
 
 #include <fmt/format.h>
 
+#include <rex/cvar.h>
 #include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
+
+REXCVAR_DECLARE(int32_t, gamepad_subtype);
+REXCVAR_DECLARE(bool, gamepad_whammy_rest);
 
 // The X_STATUS_* / X_ERROR_* macros cast through these unqualified, so
 // FakeDriver cannot match the base class signatures without them.
@@ -70,6 +74,14 @@ class FakeDriver final : public InputDriver {
 
   void SetButtons(uint64_t id, uint16_t buttons) {
     states_[static_cast<DeviceId>(id)].gamepad.buttons = buttons;
+  }
+
+  void SetRightX(uint64_t id, int16_t x) { states_[static_cast<DeviceId>(id)].gamepad.thumb_rx = x; }
+
+  void SetWhammyBar(uint64_t id, bool bar) {
+    for (DeviceInfo& d : devices_) {
+      if (d.id == static_cast<DeviceId>(id)) d.whammy_bar = bar;
+    }
   }
 
   void QueueKeystroke(uint64_t id, uint16_t vk) {
@@ -290,4 +302,35 @@ TEST_CASE("Several threads read the controllers at once", "[input]") {
     thread.join();
   }
   REQUIRE_FALSE(failed);
+}
+
+TEST_CASE("A gamepad played as a guitar keeps a whammy bar's rest", "[input]") {
+  const int32_t subtype = REXCVAR_GET(gamepad_subtype);
+  const bool whammy_rest = REXCVAR_GET(gamepad_whammy_rest);
+  REXCVAR_SET(gamepad_subtype, 6);
+  REXCVAR_SET(gamepad_whammy_rest, true);
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  X_INPUT_STATE state = {};
+
+  // A stick: in the middle the bar is at rest, at either side all the way.
+  driver->SetRightX(1, 0);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_rx) == -32768);
+  driver->SetRightX(1, -32768);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_rx) == 32767);
+
+  // A bar already (a guitar that reports itself as a gamepad, found resting at -32768, or calibrated): its own value.
+  driver->SetWhammyBar(1, true);
+  driver->SetRightX(1, -32768);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_rx) == -32768);
+  driver->SetRightX(1, 32767);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<int16_t>(state.gamepad.thumb_rx) == 32767);
+
+  REXCVAR_SET(gamepad_subtype, subtype);
+  REXCVAR_SET(gamepad_whammy_rest, whammy_rest);
 }

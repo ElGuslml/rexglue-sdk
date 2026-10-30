@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -40,6 +43,11 @@ REXCVAR_DEFINE_STRING(gamepad_device_remap, "", "Input",
                       "'controller:control=input,...' joined by ';', a controller named by its serial number or "
                       "else its SDL GUID (as the log's OnControllerDeviceAdded lines give them). A launcher writes "
                       "it");
+REXCVAR_DEFINE_STRING(gamepad_whammy_calibration, "", "Input",
+                      "Whammy bars a launcher calibrated: controller=axis:rest:full entries separated by commas, a "
+                      "controller named as in gamepad_device_remap, axis one of lx ly rx ry lt rt, rest and full the "
+                      "axis's SDL values with the bar at rest and pressed all the way. The right stick's X is then "
+                      "that axis, from -32768 at rest to 32767");
 REXCVAR_DEFINE_BOOL(
     guitar_whammy_rest, false, "Input",
     "A guitar's whammy bar (the right stick's X axis) is at rest, -32768, until the guitar "
@@ -239,6 +247,78 @@ std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType ty
     changes += (changes.empty() ? "" : ",") + std::string(kControlNames[c]) + "=" + inputs;
   }
   return sources;
+}
+
+// gamepad_whammy_calibration's entry for a controller: its serial number's, else its GUID's.
+SDLInputDriver::WhammyCalibration WhammyCalibrationFor(std::string_view serial, std::string_view guid) {
+  constexpr const char* kAxes[] = {"lx", "ly", "rx", "ry", "lt", "rt"};  // SDL_GamepadAxis's order
+  std::optional<SDLInputDriver::WhammyCalibration> by_serial, by_guid;
+  ForEachPiece(REXCVAR_GET(gamepad_whammy_calibration), ',', [&](std::string_view entry) {
+    size_t equals = entry.rfind('=');
+    if (equals == std::string_view::npos) {
+      return;
+    }
+    std::string_view controller = Trim(entry.substr(0, equals));
+    std::string_view value = Trim(entry.substr(equals + 1));
+    size_t first = value.find(':');
+    size_t second = first == std::string_view::npos ? first : value.find(':', first + 1);
+    if (second == std::string_view::npos) {
+      return;
+    }
+    SDLInputDriver::WhammyCalibration calibration;
+    std::string_view axis = Trim(value.substr(0, first));
+    for (int i = 0; i < int(std::size(kAxes)); ++i) {
+      if (EqualsCI(axis, kAxes[i])) {
+        calibration.axis = i;
+      }
+    }
+    std::string_view rest = Trim(value.substr(first + 1, second - first - 1));
+    std::string_view full = Trim(value.substr(second + 1));
+    if (calibration.axis < 0 ||
+        std::from_chars(rest.data(), rest.data() + rest.size(), calibration.rest).ec != std::errc() ||
+        std::from_chars(full.data(), full.data() + full.size(), calibration.full).ec != std::errc() ||
+        calibration.rest == calibration.full) {
+      REXLOG_WARN("gamepad_whammy_calibration: '{}' is not axis:rest:full", value);
+      return;
+    }
+    if (!serial.empty() && EqualsCI(controller, serial)) {
+      by_serial = calibration;
+    } else if (!guid.empty() && EqualsCI(controller, guid)) {
+      by_guid = calibration;
+    }
+  });
+  return by_serial ? *by_serial : by_guid ? *by_guid : SDLInputDriver::WhammyCalibration{};
+}
+
+// A calibrated bar's position as the right stick's X: from -32768 at rest to 32767 all the way.
+int16_t CalibratedWhammy(const SDLInputDriver::WhammyCalibration& calibration, int32_t value) {
+  double t = double(value - calibration.rest) / double(calibration.full - calibration.rest);
+  t = std::clamp(t, 0.0, 1.0);
+  return static_cast<int16_t>(std::lround(-32768.0 + t * 65535.0));
+}
+
+// A gamepad's right stick's X has stayed within this of where it was for this long: it rests there, a whammy bar's
+// rest when that is within kRestReach of -32768, a stick's when within kRestReach of the middle.
+constexpr int32_t kStillReach = 1024;
+constexpr auto kStillTime = std::chrono::seconds(1);
+constexpr int32_t kRestReach = 3277;
+
+SDLInputDriver::RightXRest JudgeRightXRest(SDLInputDriver::RightXRest rest, int32_t still_value,
+                                           std::chrono::steady_clock::time_point still_since, uint64_t device) {
+  if (rest != SDLInputDriver::RightXRest::kUnknown || still_since == std::chrono::steady_clock::time_point{} ||
+      std::chrono::steady_clock::now() - still_since < kStillTime) {
+    return rest;
+  }
+  if (still_value <= -32768 + kRestReach) {
+    rest = SDLInputDriver::RightXRest::kBar;
+  } else if (std::abs(still_value) <= kRestReach) {
+    rest = SDLInputDriver::RightXRest::kStick;
+  } else {
+    return rest;
+  }
+  REXLOG_INFO("SDL: device {}'s right stick's X rests at {}: {}.", device, still_value,
+              rest == SDLInputDriver::RightXRest::kBar ? "a whammy bar" : "a stick");
+  return rest;
 }
 
 // SDL clamps to SDL_MAX_RUMBLE_DURATION_MS, which is not a public constant.
@@ -486,7 +566,9 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
 
   auto guard = DrainAndLock();
 
-  for (const auto& controller : controllers_) {
+  for (auto& controller : controllers_) {
+    controller.right_x_rest = JudgeRightXRest(controller.right_x_rest, controller.right_x_still_value,
+                                              controller.right_x_still_since, static_cast<uint64_t>(controller.id));
     DeviceInfo info;
     info.id = controller.id;
     const char* name = SDL_GetGamepadName(controller.sdl);
@@ -499,6 +581,7 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
     info.serial = serial ? serial : "";
     info.subtype = GamepadSubType(controller.sdl);
     info.synthetic = false;
+    info.whammy_bar = controller.whammy.axis >= 0 || controller.right_x_rest == RightXRest::kBar;
     out.push_back(info);
   }
 }
@@ -841,7 +924,13 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
                 SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
   }
   UpdateXCapabilities(state);
-  if (joy_type == SDL_JOYSTICK_TYPE_GUITAR && REXCVAR_GET(guitar_whammy_rest)) {
+  state.whammy = WhammyCalibrationFor(serial ? serial : "", guid_text);
+  if (state.whammy.axis >= 0) {
+    state.state.gamepad.thumb_rx = INT16_MIN;
+    REXLOG_INFO("SDL OnControllerDeviceAdded: whammy bar calibrated (gamepad_whammy_calibration): SDL axis {}, {} at "
+                "rest, {} all the way.",
+                state.whammy.axis, state.whammy.rest, state.whammy.full);
+  } else if (joy_type == SDL_JOYSTICK_TYPE_GUITAR && REXCVAR_GET(guitar_whammy_rest)) {
     state.whammy_unknown = true;
     state.state.gamepad.thumb_rx = INT16_MIN;
   }
@@ -890,6 +979,9 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
   }
   auto& controller = controllers_.at(*idx);
   auto& pad = controller.state.gamepad;
+  if (controller.whammy.axis == event.gaxis.axis) {
+    pad.thumb_rx = CalibratedWhammy(controller.whammy, event.gaxis.value);
+  }
   switch (event.gaxis.axis) {
     case SDL_GAMEPAD_AXIS_LEFTX:
       pad.thumb_lx = event.gaxis.value;
@@ -898,6 +990,15 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
       pad.thumb_ly = ~event.gaxis.value;
       break;
     case SDL_GAMEPAD_AXIS_RIGHTX:
+      if (controller.whammy.axis >= 0) {
+        break;  // the calibrated bar's, above
+      }
+      if (controller.right_x_rest == RightXRest::kUnknown &&
+          (controller.right_x_still_since == std::chrono::steady_clock::time_point{} ||
+           std::abs(event.gaxis.value - controller.right_x_still_value) > kStillReach)) {
+        controller.right_x_still_value = event.gaxis.value;
+        controller.right_x_still_since = std::chrono::steady_clock::now();
+      }
       if (controller.whammy_unknown) {
         if (event.gaxis.value == 0) {
           break;

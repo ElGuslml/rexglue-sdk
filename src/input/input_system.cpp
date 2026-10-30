@@ -68,8 +68,10 @@ REXCVAR_DEFINE_STRING(gamepad_tap_sources, "", "Input",
 REXCVAR_DEFINE_BOOL(gamepad_whammy_rest, false, "Input",
                     "A gamepad, or the keyboard's pad, that the game is told is a guitar: its right stick's X "
                     "axis is the whammy bar, at rest (-32768) while the stick is centred and fully pressed at "
-                    "either side, as a guitar's bar. Off: the stick's own value, which a guitar game reads as "
-                    "the bar held half way");
+                    "either side, as a guitar's bar; a right stick found resting at -32768 for a second (a guitar "
+                    "that reports itself as a gamepad) or calibrated (gamepad_whammy_calibration) is a bar already "
+                    "and keeps its value. Off: the stick's own value, which a guitar game reads as the bar held half "
+                    "way");
 namespace rex::input {
 
 namespace {
@@ -371,8 +373,9 @@ bool InputSystem::PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepa
   // The whammy bar: a guitar's rests at -32768 and the game reads the axis from there (Guitar Hero: Metallica takes
   // its scripts' resting position, -0.76 of the axis, as the bar at rest), so a centred stick, 0, was the bar held
   // about half way on every sustain. The stick's distance from the centre, on either side, is the bar's travel, past
-  // a tenth of it, where a stick may drift.
-  if (whammy_rest) {
+  // a tenth of it, where a stick may drift. A bar already (calibrated, or a guitar that reports itself as a gamepad,
+  // found resting at -32768: folded, its rest would be the bar all the way) is left as it is.
+  if (whammy_rest && !device.whammy_bar) {
     constexpr int32_t kDeadZone = 3277;
     const int32_t x = gamepad->thumb_rx;
     const int32_t travel = std::max(0, std::min(32767, x < 0 ? -x : x) - kDeadZone);

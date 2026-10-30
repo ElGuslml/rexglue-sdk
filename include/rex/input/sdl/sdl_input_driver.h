@@ -13,6 +13,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -46,6 +47,16 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
 
   // The Xbox 360 controls gamepad_remap can move: A B X Y LB RB LT RT LS RS Start Back Guide (the D-pad stays).
   static constexpr int kRemapControls = 13;
+
+  // A whammy bar a launcher calibrated (gamepad_whammy_calibration): the SDL_GamepadAxis it is on, and that axis's
+  // SDL value at rest and pressed all the way.
+  struct WhammyCalibration {
+    int axis = -1;  // -1: none
+    int32_t rest = 0;
+    int32_t full = 0;
+  };
+  // Where a gamepad's right stick's X axis rests, judged once the axis has stayed put for a second.
+  enum class RightXRest : uint8_t { kUnknown, kStick, kBar };
 
  private:
   enum class RepeatState {
@@ -82,6 +93,14 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     // 360 guitar reads 0 there, half pressed, until the bar first moves. Until then the bar is at rest (with
     // guitar_whammy_rest).
     bool whammy_unknown;
+    // Its calibrated whammy bar: the right stick's X is that axis, from rest (-32768) to all the way (32767).
+    WhammyCalibration whammy;
+    // Where its right stick's X rests (a gamepad played as a guitar, gamepad_whammy_rest: a guitar that reports
+    // itself as a gamepad rests its bar at -32768, a stick in the middle), and since when the axis has stayed near
+    // `right_x_still_value` (empty: it has reported nothing yet).
+    RightXRest right_x_rest;
+    int32_t right_x_still_value;
+    std::chrono::steady_clock::time_point right_x_still_since;
   };
 
   // WindowListener

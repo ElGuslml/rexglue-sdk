@@ -30,6 +30,10 @@ struct DeviceInfo {
   std::string serial;  // the controller's own, when its driver has one (SDL's HIDAPI pads)
   uint8_t subtype = 0x01;  // XINPUT_DEVSUBTYPE_*
   bool synthetic = false;  // keyboard/mouse emulation or the NOP stand-in
+  // Its right stick's X axis is a whammy bar already, -32768 at rest: calibrated (gamepad_whammy_calibration), or a
+  // gamepad's found resting there (a guitar that reports itself as a gamepad). Not folded as a stick's
+  // (gamepad_whammy_rest).
+  bool whammy_bar = false;
 };
 
 }  // namespace rex::input
