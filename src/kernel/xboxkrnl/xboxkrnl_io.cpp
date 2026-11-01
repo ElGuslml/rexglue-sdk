@@ -608,6 +608,30 @@ u32 NtFlushBuffersFile_entry(u32 file_handle, ppc_ptr_t<X_IO_STATUS_BLOCK> io_st
   return result;
 }
 
+// The file reads and writes complete before NtReadFile / NtWriteFile return, so no I/O is ever pending to cancel.
+// The kernel's NtCancelIoFile succeeds on a valid handle whether or not it cancelled anything; the stub returned the
+// handle in r3, a negative status, and Guitar Hero 5 took its cancel of a character's model load as failed, left the
+// request in an error state and loaded no character again (a clock icon).
+u32 NtCancelIoFile_entry(u32 file_handle, ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block_ptr) {
+  if (!REX_KERNEL_OBJECTS()->LookupObject<XFile>(file_handle)) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+  if (io_status_block_ptr) {
+    io_status_block_ptr->status = X_STATUS_SUCCESS;
+    io_status_block_ptr->information = 0;
+  }
+  return X_STATUS_SUCCESS;
+}
+
+// The request to cancel has completed already (above): not found, as the kernel reports it then.
+u32 NtCancelIoFileEx_entry(u32 file_handle, mapped_void io_request_to_cancel,
+                           ppc_ptr_t<X_IO_STATUS_BLOCK> io_status_block_ptr) {
+  if (!REX_KERNEL_OBJECTS()->LookupObject<XFile>(file_handle)) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+  return X_STATUS_NOT_FOUND;
+}
+
 // https://docs.microsoft.com/en-us/windows/win32/devnotes/ntopensymboliclinkobject
 u32 NtOpenSymbolicLinkObject_entry(mapped_u32 handle_out,
                                    ppc_ptr_t<X_OBJECT_ATTRIBUTES> object_attrs) {
@@ -771,6 +795,8 @@ REX_EXPORT(__imp__NtRemoveIoCompletion, rex::kernel::xboxkrnl::NtRemoveIoComplet
 REX_EXPORT(__imp__NtQueryFullAttributesFile, rex::kernel::xboxkrnl::NtQueryFullAttributesFile_entry)
 REX_EXPORT(__imp__NtQueryDirectoryFile, rex::kernel::xboxkrnl::NtQueryDirectoryFile_entry)
 REX_EXPORT(__imp__NtFlushBuffersFile, rex::kernel::xboxkrnl::NtFlushBuffersFile_entry)
+REX_EXPORT(__imp__NtCancelIoFile, rex::kernel::xboxkrnl::NtCancelIoFile_entry)
+REX_EXPORT(__imp__NtCancelIoFileEx, rex::kernel::xboxkrnl::NtCancelIoFileEx_entry)
 REX_EXPORT(__imp__NtOpenSymbolicLinkObject, rex::kernel::xboxkrnl::NtOpenSymbolicLinkObject_entry)
 REX_EXPORT(__imp__NtQuerySymbolicLinkObject, rex::kernel::xboxkrnl::NtQuerySymbolicLinkObject_entry)
 REX_EXPORT(__imp__FscGetCacheElementCount, rex::kernel::xboxkrnl::FscGetCacheElementCount_entry)
@@ -813,8 +839,6 @@ REX_EXPORT_STUB(__imp__NtSetSystemTime);
 REX_EXPORT_STUB(__imp__NtWriteFileGather);
 REX_EXPORT_STUB(__imp__IoAcquireCancelSpinLock);
 REX_EXPORT_STUB(__imp__IoReleaseCancelSpinLock);
-REX_EXPORT_STUB(__imp__NtCancelIoFile);
-REX_EXPORT_STUB(__imp__NtCancelIoFileEx);
 REX_EXPORT_STUB(__imp__SvodCreateDevice);
 
 REX_EXPORT_STUB(__imp__SataCdRomRecordReset);
