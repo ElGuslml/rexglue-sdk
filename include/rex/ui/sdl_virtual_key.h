@@ -21,4 +21,8 @@ namespace rex::ui {
 /// listener API. Returns VirtualKey::kNone for unmapped keys.
 VirtualKey TranslateSDLScancode(SDL_Scancode scancode);
 
+/// Shift, Ctrl and Alt's side (TranslateSDLScancode gives kShift, kControl and kMenu for both): kLShift, kRShift,
+/// kLControl, kRControl, kLMenu or kRMenu. VirtualKey::kNone for the other keys.
+VirtualKey TranslateSDLScancodeSide(SDL_Scancode scancode);
+
 }  // namespace rex::ui

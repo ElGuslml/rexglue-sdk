@@ -10,6 +10,8 @@
  */
 #include <rex/input/mnk/mnk_input_driver.h>
 
+#include "system_shortcuts.h"
+
 #include <rex/cvar.h>
 #include <rex/input/input.h>
 #include <rex/input/tap_strum.h>
@@ -96,21 +98,52 @@ constexpr size_t kMaxQueuedKeystrokes = 256;
 // Bind values are a comma-separated list of alternatives, each optionally
 // carrying modifier prefixes: "Q,I" or "Shift+W". Modifier matching is exact,
 // so "Up" stays silent while Shift is held and "Shift+Up" stays silent without
-// it. That is what lets the D-pad share the arrow keys. A consequence is
-// that binding a bare modifier name ("Shift") can never fire, since holding it
-// makes the live mask non-zero while the bind wants zero.
+// it. That is what lets the D-pad share the arrow keys. A modifier key bound
+// alone ("LAlt", or "Alt" for either side: a music game's Star Power) is that
+// control's key and no longer a modifier, for every bind: holding it leaves the
+// other binds as they are, and a bind that needs it as a prefix never fires.
 constexpr uint8_t kModShift = 1u << 0;
 constexpr uint8_t kModCtrl = 1u << 1;
 constexpr uint8_t kModAlt = 1u << 2;
 
-uint8_t LiveModifiers(const bool (&key_down)[256]) {
+// Shift, Ctrl and Alt's six keys, one bit each in a mask of the ones bound alone.
+struct SideKey {
+  VirtualKey key;
+  VirtualKey either;  // kShift, kControl or kMenu
+  uint8_t bit;
+  uint8_t mod;
+  const char* name;
+};
+constexpr SideKey kSideKeys[] = {
+    {VirtualKey::kLShift, VirtualKey::kShift, 1u << 0, kModShift, "LShift"},
+    {VirtualKey::kRShift, VirtualKey::kShift, 1u << 1, kModShift, "RShift"},
+    {VirtualKey::kLControl, VirtualKey::kControl, 1u << 2, kModCtrl, "LCtrl"},
+    {VirtualKey::kRControl, VirtualKey::kControl, 1u << 3, kModCtrl, "RCtrl"},
+    {VirtualKey::kLMenu, VirtualKey::kMenu, 1u << 4, kModAlt, "LAlt"},
+    {VirtualKey::kRMenu, VirtualKey::kMenu, 1u << 5, kModAlt, "RAlt"},
+};
+constexpr uint8_t kSidesShift = 0x03;
+constexpr uint8_t kSidesAlt = 0x30;
+
+// The side keys a key names: one for "LAlt", both for "Alt", none for a key that is not a modifier.
+uint8_t SideBits(VirtualKey vk) {
+  uint8_t bits = 0;
+  for (const SideKey& side : kSideKeys) {
+    if (side.key == vk || side.either == vk) {
+      bits |= side.bit;
+    }
+  }
+  return bits;
+}
+
+// The modifiers held, leaving out the keys bound alone ('bare', SideKey bits).
+uint8_t LiveModifiers(const bool (&key_down)[256], uint8_t bare) {
   uint8_t mods = 0;
-  if (key_down[static_cast<uint16_t>(rex::ui::VirtualKey::kShift)])
-    mods |= kModShift;
-  if (key_down[static_cast<uint16_t>(rex::ui::VirtualKey::kControl)])
-    mods |= kModCtrl;
-  if (key_down[static_cast<uint16_t>(rex::ui::VirtualKey::kMenu)])
-    mods |= kModAlt;
+  for (const SideKey& side : kSideKeys) {
+    if (key_down[static_cast<uint16_t>(side.key)] && !(bare & side.bit)) {
+      mods |= side.mod;
+    }
+  }
   return mods;
 }
 
@@ -148,6 +181,25 @@ std::string_view TrimSpaces(std::string_view s) {
     s.remove_suffix(1);
   }
   return s;
+}
+
+// Whether fn holds for an alternative of a bind value (each trimmed; empty ones skipped).
+template <typename Fn>
+bool AnyToken(std::string_view rest, Fn&& fn) {
+  while (!rest.empty()) {
+    size_t comma = rest.find(',');
+    std::string_view token = rest.substr(0, comma);
+    if (comma == std::string_view::npos) {
+      rest = std::string_view();
+    } else {
+      rest.remove_prefix(comma + 1);
+    }
+    token = TrimSpaces(token);
+    if (!token.empty() && fn(token)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t live_mods) {
@@ -316,6 +368,24 @@ std::array<PadBind, 24> PadBinds() {
   }};
 }
 
+// The modifier keys bound alone to a control (SideKey bits).
+uint8_t BareModifierKeys() {
+  uint8_t bare = 0;
+  auto scan = [&bare](const std::string& keys) {
+    AnyToken(keys, [&bare](std::string_view token) {
+      if (TakeModifiers(token) == 0) {
+        bare |= SideBits(rex::ui::ParseVirtualKey(token));
+      }
+      return false;
+    });
+  };
+  for (const PadBind& bind : PadBinds()) {
+    scan(bind.keys);
+  }
+  scan(REXCVAR_GET(keybind_guide));
+  return bare;
+}
+
 }  // namespace
 
 void SetMouseLookActive(bool active) {
@@ -370,6 +440,7 @@ void MnkInputDriver::DetachFromWindow() {
     ReleaseMouseCaptureFromUIThread(window);
     window->RemoveInputListener(this);
     window->RemoveListener(this);
+    HoldSystemShortcuts(false, false);
   });
 }
 
@@ -382,23 +453,8 @@ static bool IsPassthroughEnabled() {
   return REXCVAR_GET(mnk_passthrough);
 }
 
-static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_val) {
-  const uint8_t live_mods = LiveModifiers(key_down);
-  std::string_view rest(cvar_val);
-  while (!rest.empty()) {
-    size_t comma = rest.find(',');
-    std::string_view token = rest.substr(0, comma);
-    if (comma == std::string_view::npos) {
-      rest = std::string_view();
-    } else {
-      rest.remove_prefix(comma + 1);
-    }
-    token = TrimSpaces(token);
-    if (!token.empty() && TokenPressed(key_down, token, live_mods)) {
-      return true;
-    }
-  }
-  return false;
+static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_val, uint8_t live_mods) {
+  return AnyToken(cvar_val, [&](std::string_view token) { return TokenPressed(key_down, token, live_mods); });
 }
 
 void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
@@ -479,61 +535,64 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
 
   std::lock_guard lock(state_mutex_);
 
+  const uint8_t live_mods = LiveModifiers(key_down_, BareModifiersLocked());
+  auto pressed = [&](const std::string& keys) { return IsBindPressed(key_down_, keys, live_mods); };
+
   uint16_t buttons = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a)))
+  if (pressed(REXCVAR_GET(keybind_a)))
     buttons |= X_INPUT_GAMEPAD_A;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_b)))
+  if (pressed(REXCVAR_GET(keybind_b)))
     buttons |= X_INPUT_GAMEPAD_B;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_x)))
+  if (pressed(REXCVAR_GET(keybind_x)))
     buttons |= X_INPUT_GAMEPAD_X;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_y)))
+  if (pressed(REXCVAR_GET(keybind_y)))
     buttons |= X_INPUT_GAMEPAD_Y;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_left_shoulder)))
+  if (pressed(REXCVAR_GET(keybind_left_shoulder)))
     buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_right_shoulder)))
+  if (pressed(REXCVAR_GET(keybind_right_shoulder)))
     buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_press)))
+  if (pressed(REXCVAR_GET(keybind_lstick_press)))
     buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_press)))
+  if (pressed(REXCVAR_GET(keybind_rstick_press)))
     buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_back)))
+  if (pressed(REXCVAR_GET(keybind_back)))
     buttons |= X_INPUT_GAMEPAD_BACK;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_start)))
+  if (pressed(REXCVAR_GET(keybind_start)))
     buttons |= X_INPUT_GAMEPAD_START;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_guide)))
+  if (pressed(REXCVAR_GET(keybind_guide)))
     buttons |= X_INPUT_GAMEPAD_GUIDE;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_up)))
+  if (pressed(REXCVAR_GET(keybind_dpad_up)))
     buttons |= X_INPUT_GAMEPAD_DPAD_UP;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_down)))
+  if (pressed(REXCVAR_GET(keybind_dpad_down)))
     buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_left)))
+  if (pressed(REXCVAR_GET(keybind_dpad_left)))
     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right)))
+  if (pressed(REXCVAR_GET(keybind_dpad_right)))
     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
 
-  uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
-  uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
+  uint8_t lt = pressed(REXCVAR_GET(keybind_left_trigger)) ? 0xFF : 0;
+  uint8_t rt = pressed(REXCVAR_GET(keybind_right_trigger)) ? 0xFF : 0;
 
   int32_t lx = 0;
   int32_t ly = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_left)))
+  if (pressed(REXCVAR_GET(keybind_lstick_left)))
     lx -= INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_right)))
+  if (pressed(REXCVAR_GET(keybind_lstick_right)))
     lx += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_up)))
+  if (pressed(REXCVAR_GET(keybind_lstick_up)))
     ly += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_lstick_down)))
+  if (pressed(REXCVAR_GET(keybind_lstick_down)))
     ly -= INT16_MAX;
 
   int32_t rx = 0;
   int32_t ry = 0;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_left)))
+  if (pressed(REXCVAR_GET(keybind_rstick_left)))
     rx -= INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_right)))
+  if (pressed(REXCVAR_GET(keybind_rstick_right)))
     rx += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_up)))
+  if (pressed(REXCVAR_GET(keybind_rstick_up)))
     ry += INT16_MAX;
-  if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
+  if (pressed(REXCVAR_GET(keybind_rstick_down)))
     ry -= INT16_MAX;
 
   if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
@@ -637,9 +696,10 @@ void MnkInputDriver::EnqueueRawKeystroke(const rex::ui::KeyEvent& e, bool down) 
 
 void MnkInputDriver::RefreshBoundKeystrokesLocked() {
   const auto binds = PadBinds();
+  const uint8_t live_mods = LiveModifiers(key_down_, BareModifiersLocked());
   uint32_t pressed = 0;
   for (size_t i = 0; i < binds.size(); i++) {
-    if (IsBindPressed(key_down_, binds[i].keys)) {
+    if (IsBindPressed(key_down_, binds[i].keys, live_mods)) {
       pressed |= uint32_t(1) << i;
     }
   }
@@ -743,6 +803,54 @@ void MnkInputDriver::SetKeyState(uint16_t vk, bool down) {
   }
 }
 
+void MnkInputDriver::SetKeyEventState(const rex::ui::KeyEvent& e, bool down) {
+  const VirtualKey vk = e.virtual_key();
+  // Shift, Ctrl and Alt: the side's key, and kShift, kControl or kMenu while either side is down. A window that
+  // cannot tell the side: the left one's.
+  const SideKey* left = nullptr;
+  for (const SideKey& side : kSideKeys) {
+    if (side.either == vk) {
+      left = &side;
+      break;
+    }
+  }
+  if (!left) {
+    SetKeyState(static_cast<uint16_t>(vk), down);
+    return;
+  }
+  const SideKey& right = left[1];
+  const VirtualKey side = e.side_key() != VirtualKey::kNone ? e.side_key() : left->key;
+  SetKeyState(static_cast<uint16_t>(side), down);
+  SetKeyState(static_cast<uint16_t>(vk), key_down_[static_cast<uint16_t>(left->key)] ||
+                                             key_down_[static_cast<uint16_t>(right.key)]);
+}
+
+uint8_t MnkInputDriver::BareModifiersLocked() {
+  const uint8_t bare = BareModifierKeys();
+  if (bare != bare_modifiers_) {
+    bare_modifiers_ = bare;
+    std::string names;
+    for (const SideKey& side : kSideKeys) {
+      if (bare & side.bit) {
+        names += names.empty() ? side.name : std::string(", ") + side.name;
+      }
+    }
+    if (names.empty()) {
+      REXLOG_INFO("Keyboard: no modifier key is bound alone");
+    } else {
+      REXLOG_INFO("Keyboard: {} bound alone, a control's key and not a modifier of the other binds", names);
+    }
+  }
+  return bare;
+}
+
+void MnkInputDriver::UpdateSystemShortcutsLocked() {
+  const uint8_t bare = BareModifiersLocked();
+  // Only a window's keys set them off.
+  const bool window = attached_window_ != nullptr;
+  HoldSystemShortcuts(window && has_focus_ && (bare & kSidesShift) != 0, window && (bare & kSidesAlt) != 0);
+}
+
 void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
   if (!IsEnabled() || !has_focus_)
     return;
@@ -751,8 +859,8 @@ void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
     EnqueueRawKeystroke(e, true);
     return;
   }
-  uint16_t vk = static_cast<uint16_t>(e.virtual_key());
-  SetKeyState(vk, true);
+  UpdateSystemShortcutsLocked();
+  SetKeyEventState(e, true);
   RefreshBoundKeystrokesLocked();
 }
 
@@ -764,8 +872,7 @@ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
     EnqueueRawKeystroke(e, false);
     return;
   }
-  uint16_t vk = static_cast<uint16_t>(e.virtual_key());
-  SetKeyState(vk, false);
+  SetKeyEventState(e, false);
   RefreshBoundKeystrokesLocked();
 }
 
@@ -863,6 +970,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
     RefreshBoundKeystrokesLocked();
     mouse_dx_ = 0.0f;
     mouse_dy_ = 0.0f;
+    UpdateSystemShortcutsLocked();
   }
   if (attached_window_) {
     ReleaseMouseCaptureFromUIThread(attached_window_);
@@ -871,6 +979,10 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
 
 void MnkInputDriver::OnGotFocus(rex::ui::UISetupEvent&) {
   has_focus_ = true;
+  if (IsEnabled() && !IsPassthroughEnabled()) {
+    std::lock_guard lock(state_mutex_);
+    UpdateSystemShortcutsLocked();
+  }
 }
 
 }  // namespace rex::input::mnk

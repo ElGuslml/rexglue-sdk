@@ -32,6 +32,11 @@ void SetTapGate(bool (*gate)());
 void SetMouseLookActive(bool active);
 bool IsMouseLookActive();
 
+/// Gives back, as they were, the system shortcuts the keyboard's binds hold off (a Shift key bound alone to a control:
+/// Windows' Sticky Keys and Filter Keys shortcuts; an Alt key: Alt+F4 closing the window). For the app's exit, which
+/// skips the drivers' teardown. Any thread.
+void ReleaseSystemShortcuts();
+
 class MnkInputDriver final : public InputDriver,
                              public rex::ui::WindowInputListener,
                              public rex::ui::WindowListener {
@@ -67,6 +72,14 @@ class MnkInputDriver final : public InputDriver,
  private:
   bool IsEnabled() const;
   void SetKeyState(uint16_t vk, bool down);
+  /// A key event's key; for Shift, Ctrl and Alt, its side's key too (see BareModifiersLocked).
+  void SetKeyEventState(const rex::ui::KeyEvent& e, bool down);
+  /// The modifier keys bound alone to a control: those keys are not modifiers of the other binds. Logs a change.
+  /// Call with state_mutex_ held.
+  uint8_t BareModifiersLocked();
+  /// The system shortcuts those keys would set off, held off while the window has focus (system_shortcuts.h). Call
+  /// with state_mutex_ held, on the UI thread.
+  void UpdateSystemShortcutsLocked();
   void EnqueueKeystroke(uint16_t vk_pad, bool down);
   /// Appends to the keystroke queue, evicting the oldest entry once it is full.
   void PushKeystroke(const X_INPUT_KEYSTROKE& ks);
@@ -129,6 +142,9 @@ class MnkInputDriver final : public InputDriver,
 
   // Packet number incremented on state change
   uint32_t packet_number_ = 0;
+
+  // The modifier keys bound alone at the last look, to log a change (state_mutex_ held).
+  uint8_t bare_modifiers_ = 0;
 
   // mnk_tap_target's (guest thread, state_mutex_ held).
   TapStrum tap_;

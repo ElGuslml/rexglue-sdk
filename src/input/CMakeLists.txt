@@ -7,6 +7,7 @@ add_library(rexinput OBJECT
     state_merge.cpp
     tap_strum.cpp
     mnk/mnk_input_driver.cpp
+    mnk/system_shortcuts.cpp
     nop/nop_input_driver.cpp
 )
 add_library(rex::input ALIAS rexinput)

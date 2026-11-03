@@ -569,6 +569,7 @@ void WindowSDL::HandleKeyEvent(SDL_Event& event) {
              /*modifier_ctrl_pressed=*/(mod & SDL_KMOD_CTRL) != 0,
              /*modifier_alt_pressed=*/(mod & SDL_KMOD_ALT) != 0,
              /*modifier_super_pressed=*/(mod & SDL_KMOD_GUI) != 0);
+  e.set_side_key(TranslateSDLScancodeSide(event.key.scancode));
   WindowDestructionReceiver destruction_receiver(this);
   if (event.type == SDL_EVENT_KEY_DOWN) {
     OnKeyDown(e, destruction_receiver);

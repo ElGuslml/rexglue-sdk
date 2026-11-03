@@ -31,6 +31,7 @@
 #include <rex/audio/audio_system.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
 #include <rex/input/input_system.h>
+#include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/kernel/init.h>
 #include <rex/string/numeric.h>
 #include <rex/system.h>
@@ -652,6 +653,8 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   // ShutdownLogging, which frees loggers a straggler may still use); the OS
   // reclaims the rest.
   REXLOG_INFO("Title terminated; hard-exiting process.");
+  // The exit skips the input drivers' teardown, which gives the system's shortcuts back.
+  rex::input::mnk::ReleaseSystemShortcuts();
   rex::FlushLogging();
   std::_Exit(0);
 }

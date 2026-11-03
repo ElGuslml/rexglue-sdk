@@ -131,4 +131,23 @@ VirtualKey TranslateSDLScancode(SDL_Scancode scancode) {
   }
 }
 
+VirtualKey TranslateSDLScancodeSide(SDL_Scancode scancode) {
+  switch (scancode) {
+    case SDL_SCANCODE_LSHIFT:
+      return VirtualKey::kLShift;
+    case SDL_SCANCODE_RSHIFT:
+      return VirtualKey::kRShift;
+    case SDL_SCANCODE_LCTRL:
+      return VirtualKey::kLControl;
+    case SDL_SCANCODE_RCTRL:
+      return VirtualKey::kRControl;
+    case SDL_SCANCODE_LALT:
+      return VirtualKey::kLMenu;
+    case SDL_SCANCODE_RALT:
+      return VirtualKey::kRMenu;
+    default:
+      return VirtualKey::kNone;
+  }
+}
+
 }  // namespace rex::ui

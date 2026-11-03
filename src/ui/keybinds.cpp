@@ -112,10 +112,17 @@ static const std::unordered_map<std::string, VirtualKey> kKeyNames = {
     {"Right", VirtualKey::kRight},
     {"Up", VirtualKey::kUp},
     {"Down", VirtualKey::kDown},
-    // Modifier
+    // Modifier: either side, or one
     {"Shift", VirtualKey::kShift},
     {"Control", VirtualKey::kControl},
+    {"Ctrl", VirtualKey::kControl},
     {"Alt", VirtualKey::kMenu},
+    {"LShift", VirtualKey::kLShift},
+    {"RShift", VirtualKey::kRShift},
+    {"LCtrl", VirtualKey::kLControl},
+    {"RCtrl", VirtualKey::kRControl},
+    {"LAlt", VirtualKey::kLMenu},
+    {"RAlt", VirtualKey::kRMenu},
     // Numpad
     {"Numpad0", VirtualKey::kNumpad0},
     {"Numpad1", VirtualKey::kNumpad1},

@@ -97,9 +97,15 @@ class KeyEvent : public UIEvent {
   bool is_alt_pressed() const { return modifier_alt_pressed_; }
   bool is_super_pressed() const { return modifier_super_pressed_; }
 
+  /// For Shift, Ctrl and Alt (virtual_key kShift, kControl, kMenu, either side): the side's key, kLShift to kRMenu.
+  /// kNone for the other keys, or when the window cannot tell.
+  VirtualKey side_key() const { return side_key_; }
+  void set_side_key(VirtualKey key) { side_key_ = key; }
+
  private:
   bool handled_ = false;
   VirtualKey virtual_key_ = VirtualKey::kNone;
+  VirtualKey side_key_ = VirtualKey::kNone;
 
   int repeat_count_ = 0;
   bool prev_state_ = false;  // Key previously down(true) or up(false)
