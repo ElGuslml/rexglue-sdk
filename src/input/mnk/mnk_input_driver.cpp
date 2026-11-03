@@ -388,6 +388,24 @@ uint8_t BareModifierKeys() {
 
 }  // namespace
 
+bool PlaysKey(VirtualKey vk) {
+  if (!REXCVAR_GET(mnk_mode) || REXCVAR_GET(mnk_passthrough)) {
+    return false;
+  }
+  auto names = [vk](const std::string& keys) {
+    return AnyToken(keys, [vk](std::string_view token) {
+      TakeModifiers(token);
+      return rex::ui::ParseVirtualKey(token) == vk;
+    });
+  };
+  for (const PadBind& bind : PadBinds()) {
+    if (names(bind.keys)) {
+      return true;
+    }
+  }
+  return names(REXCVAR_GET(keybind_guide));
+}
+
 void SetMouseLookActive(bool active) {
   mouse_look_active.store(active, std::memory_order_relaxed);
 }
@@ -416,6 +434,7 @@ void MnkInputDriver::OnWindowAvailable(rex::ui::Window* window) {
     }
     window->AddInputListener(this, window_z_order());
     window->AddListener(this);
+    rex::ui::SetKeyClaimCheck(&PlaysKey);
   }
 }
 
@@ -441,6 +460,7 @@ void MnkInputDriver::DetachFromWindow() {
     window->RemoveInputListener(this);
     window->RemoveListener(this);
     HoldSystemShortcuts(false, false);
+    rex::ui::SetKeyClaimCheck(nullptr);
   });
 }
 

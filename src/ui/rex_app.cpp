@@ -540,28 +540,37 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
   // gated eager font upload in SetImmediateDrawer is skipped (font uploads
   // lazily on the first Draw instead).
   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
-  rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
-    if (debug_overlay_) {
-      debug_overlay_.reset();
-    } else {
-      debug_overlay_ =
-          std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
-    }
-  });
-  rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
-    if (console_overlay_) {
-      console_overlay_.reset();
-    } else {
-      console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
-    }
-  });
-  rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
-    if (settings_overlay_) {
-      settings_overlay_.reset();
-    } else {
-      settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
-    }
-  });
+  rex::ui::RegisterBind(
+      "bind_debug_overlay", "F3", "Toggle debug overlay",
+      [this] {
+        if (debug_overlay_) {
+          debug_overlay_.reset();
+        } else {
+          debug_overlay_ =
+              std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
+        }
+      },
+      /*debug=*/true);
+  rex::ui::RegisterBind(
+      "bind_console", "Backtick", "Toggle console overlay",
+      [this] {
+        if (console_overlay_) {
+          console_overlay_.reset();
+        } else {
+          console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
+        }
+      },
+      /*debug=*/true);
+  rex::ui::RegisterBind(
+      "bind_settings", "F4", "Toggle settings overlay",
+      [this] {
+        if (settings_overlay_) {
+          settings_overlay_.reset();
+        } else {
+          settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
+        }
+      },
+      /*debug=*/true);
   rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements overlay", [this] {
     if (achievements_overlay_) {
       achievements_overlay_.reset();

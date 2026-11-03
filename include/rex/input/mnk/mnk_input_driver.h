@@ -37,6 +37,10 @@ bool IsMouseLookActive();
 /// skips the drivers' teardown. Any thread.
 void ReleaseSystemShortcuts();
 
+/// Whether the keyboard's controller plays `vk` (a keybind_* key, alone or after modifiers; mnk_mode on, not
+/// passthrough). The window's other keys (rex::ui::RegisterBind: the overlays) give way to it.
+bool PlaysKey(rex::ui::VirtualKey vk);
+
 class MnkInputDriver final : public InputDriver,
                              public rex::ui::WindowInputListener,
                              public rex::ui::WindowListener {

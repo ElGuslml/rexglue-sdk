@@ -6,10 +6,12 @@
 #include <rex/cvar.h>
 #include <rex/input/input.h>
 #include <rex/input/mnk/mnk_input_driver.h>
+#include <rex/ui/keybinds.h>
 #include <rex/ui/ui_event.h>
 #include <rex/ui/virtual_key.h>
 
 REXCVAR_DECLARE(bool, mnk_mode);
+REXCVAR_DECLARE(bool, debug_hotkeys);
 REXCVAR_DECLARE(std::string, keybind_a);
 REXCVAR_DECLARE(std::string, keybind_b);
 REXCVAR_DECLARE(std::string, keybind_back);
@@ -110,4 +112,49 @@ TEST_CASE("A modifier bound alone is no longer a prefix", "[input][mnk]") {
   CHECK(keyboard.Buttons() == X_INPUT_GAMEPAD_B);
   keyboard.Key(VirtualKey::kShift, false, VirtualKey::kRShift);
   CHECK(keyboard.Buttons() == 0);
+}
+
+TEST_CASE("A key the keyboard plays fires no other bind", "[input][mnk]") {
+  Keyboard keyboard;
+  int settings = 0;
+  int achievements = 0;
+  rex::ui::RegisterBind("test_bind_settings", "F4", "test", [&] { ++settings; }, /*debug=*/true);
+  rex::ui::RegisterBind("test_bind_achievements", "F7", "test", [&] { ++achievements; });
+  rex::ui::SetKeyClaimCheck(&rex::input::mnk::PlaysKey);
+  auto press = [](VirtualKey vk) {
+    KeyEvent e(nullptr, vk, 1, false, false, false, false, false);
+    rex::ui::ProcessKeyEvent(e);
+  };
+
+  press(VirtualKey::kF4);
+  press(VirtualKey::kF7);
+  CHECK(settings == 1);
+  CHECK(achievements == 1);
+
+  // The developer's keys off: F4 does nothing, F7 stays.
+  REXCVAR_SET(debug_hotkeys, false);
+  press(VirtualKey::kF4);
+  press(VirtualKey::kF7);
+  CHECK(settings == 1);
+  CHECK(achievements == 2);
+  REXCVAR_SET(debug_hotkeys, true);
+
+  // On a control (with a modifier too), the key plays it and nothing else.
+  REXCVAR_SET(keybind_a, "D,F4");
+  REXCVAR_SET(keybind_b, "Ctrl+F7");
+  press(VirtualKey::kF4);
+  press(VirtualKey::kF7);
+  CHECK(settings == 1);
+  CHECK(achievements == 2);
+  keyboard.Key(VirtualKey::kF4, true);
+  CHECK(keyboard.Buttons() == X_INPUT_GAMEPAD_A);
+
+  // The keyboard off: the keys are the overlays' again.
+  REXCVAR_SET(mnk_mode, false);
+  press(VirtualKey::kF4);
+  CHECK(settings == 2);
+
+  rex::ui::SetKeyClaimCheck(nullptr);
+  rex::ui::UnregisterBind("test_bind_settings");
+  rex::ui::UnregisterBind("test_bind_achievements");
 }

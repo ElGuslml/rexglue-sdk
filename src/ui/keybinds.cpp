@@ -15,6 +15,10 @@
 #include <deque>
 #include <unordered_map>
 
+REXCVAR_DEFINE_BOOL(debug_hotkeys, true, "UI",
+                    "The developer's keys: bind_debug_overlay (F3), bind_settings (F4) and bind_console (`). Off: "
+                    "those keys do nothing here, for a game that plays them; the achievements' key stays");
+
 namespace rex::ui {
 
 using rex::ui::VirtualKey;
@@ -170,13 +174,15 @@ struct BindEntry {
   std::string name;
   std::string current_key;
   std::function<void()> callback;
+  bool debug = false;
 };
 
 static std::mutex g_binds_mutex;
 static std::deque<BindEntry> g_binds;
+static std::function<bool(VirtualKey)> g_key_claims;
 
 void RegisterBind(std::string_view name, std::string_view default_key, std::string_view description,
-                  std::function<void()> callback) {
+                  std::function<void()> callback, bool debug) {
   std::lock_guard lock(g_binds_mutex);
 
   /* Store the bind entry (owns the key string that the CVAR references). */
@@ -184,6 +190,7 @@ void RegisterBind(std::string_view name, std::string_view default_key, std::stri
   entry.name = std::string(name);
   entry.current_key = std::string(default_key);
   entry.callback = std::move(callback);
+  entry.debug = debug;
 
   /* Capture a pointer to the entry's key string for the CVAR getter/setter.
      The entry is stable because g_binds is never compacted while binds are
@@ -215,13 +222,24 @@ void UnregisterBind(std::string_view name) {
   }
 }
 
+void SetKeyClaimCheck(std::function<bool(VirtualKey)> claims) {
+  std::lock_guard lock(g_binds_mutex);
+  g_key_claims = std::move(claims);
+}
+
 bool ProcessKeyEvent(KeyEvent& e) {
   std::lock_guard lock(g_binds_mutex);
   for (auto& entry : g_binds) {
     if (!entry.callback)
       continue;
+    if (entry.debug && !REXCVAR_GET(debug_hotkeys))
+      continue;
     VirtualKey vk = ParseVirtualKey(entry.current_key);
     if (vk != VirtualKey::kNone && e.virtual_key() == vk) {
+      // The player's key: it plays, nothing else.
+      if (g_key_claims && g_key_claims(vk)) {
+        return false;
+      }
       entry.callback();
       e.set_handled(true);
       return true;

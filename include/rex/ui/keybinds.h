@@ -60,9 +60,20 @@ std::string VirtualKeyToString(VirtualKey vk);
  * @param default_key  Default key name (e.g. "Backtick", "F3").
  * @param description  Human-readable description for the settings UI.
  * @param callback     Function to invoke when the bound key is pressed.
+ * @param debug        A developer's tool (the debug and settings overlays, the
+ *                     console): the key works only while the debug_hotkeys
+ *                     cvar is on.
  */
 void RegisterBind(std::string_view name, std::string_view default_key, std::string_view description,
-                  std::function<void()> callback);
+                  std::function<void()> callback, bool debug = false);
+
+/**
+ * The keys the player plays with (the keyboard's controller, rex::input::mnk):
+ * a key @p claims returns true for fires no bind, so a key bound to a control
+ * (a fret on F4) does not also open an overlay. Null: none. The check runs on
+ * the UI thread, in ProcessKeyEvent.
+ */
+void SetKeyClaimCheck(std::function<bool(VirtualKey)> claims);
 
 /**
  * Remove a previously registered keybind.
@@ -75,7 +86,9 @@ void UnregisterBind(std::string_view name);
  *
  * Looks up each bind's current key from its CVAR, parses it, and compares
  * against the event's virtual key. If a match is found, the bind's callback
- * is invoked and the event is marked as handled.
+ * is invoked and the event is marked as handled. A key the player plays with
+ * (SetKeyClaimCheck) and a debug bind's key while debug_hotkeys is off fire
+ * nothing.
  *
  * @param e  The key event to process.
  * @return   True if a bind matched and the event was consumed.
