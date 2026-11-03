@@ -11,6 +11,7 @@
  */
 
 #include <array>
+#include <map>
 
 #include <rex/input/device.h>
 #include <rex/input/input.h>
@@ -30,8 +31,11 @@ bool IsNeutral(const X_INPUT_GAMEPAD& gamepad);
 /// button glyphs follow the pad in the player's hands.
 class ActiveDeviceTracker {
  public:
-  /// Neutral gamepads never take over, so stick drift on an idle pad cannot
-  /// steal the slot.
+  /// Only a change takes over: a button newly pressed, a trigger or a stick
+  /// leaving its rest. Stick drift within the dead zone on an idle pad cannot
+  /// steal the slot, nor can a device that rests off centre (pedals, a
+  /// throttle, a whammy bar at -32768), which a state test took for a device
+  /// in use at every read.
   void Observe(uint32_t user_index, DeviceId id, const X_INPUT_GAMEPAD& gamepad);
 
   DeviceId Active(uint32_t user_index) const;
@@ -40,6 +44,8 @@ class ActiveDeviceTracker {
  private:
   // Zero-initialized, which is DeviceId::kInvalid.
   std::array<DeviceId, kMaxGuestUsers> active_ = {};
+  // Each device's previous read, what a change is told from.
+  std::map<DeviceId, X_INPUT_GAMEPAD> previous_;
 };
 
 }  // namespace rex::input

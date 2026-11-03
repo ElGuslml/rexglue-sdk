@@ -82,6 +82,12 @@ class InputSystem : public system::IInputSystem {
   void SetPrimaryPressWindow(bool open);
   /// Whether a controller (or the keyboard's pad) is assigned to the user.
   bool UserHasDevice(uint32_t user_index);
+  /// Whether the device that speaks for the user now is of another kind than the guest was last told of
+  /// (GetCapabilities): the keyboard's pad shares user 0 with the first controller, and which of them answers follows
+  /// the one in the player's hands. A guest that asks for the kind only when a controller connects (Guitar Hero's
+  /// instruments and singer) keeps its first answer, the controller's; a game's hook makes it ask again where that is
+  /// safe. True once per change. Called on the guest's threads.
+  bool TakeDeviceKindChange(uint32_t user_index);
 
   std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
   /// Guest user whose device most recently produced a button press.
@@ -99,6 +105,10 @@ class InputSystem : public system::IInputSystem {
   DeviceId ChooseDeviceForUser(uint32_t user_index) const;
 
   void UpdateConnectedUser(uint32_t user_index, bool connected);
+  /// TakeDeviceKindChange's bookkeeping: what GetCapabilities told the guest, and whether the user's device has
+  /// changed to one of another kind since.
+  void NoteToldKind(uint32_t user_index, uint32_t flags, DeviceId device, uint8_t subtype);
+  void CheckToldKind(uint32_t user_index);
   /// SetPrimaryPressWindow's swap: the user's controller becomes user 0's and user 0's takes its user.
   bool MakePrimary(uint32_t user_index);
   void AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const;
@@ -145,6 +155,18 @@ class InputSystem : public system::IInputSystem {
   std::atomic<bool> primary_press_window_{false};
   // The buttons each user's last read had while the window is open, to tell a new press from a held button.
   std::array<uint16_t, kMaxGuestUsers> window_buttons_ = {};
+
+  // Per user: the kind of controller GetCapabilities last reported (its flags, its device and the XInput subtype the
+  // guest got), the device the user's reads came from since, and whether that one is of another kind.
+  struct ToldKind {
+    bool told = false;
+    uint32_t flags = 0;
+    DeviceId told_device = DeviceId::kInvalid;
+    uint8_t subtype = 0;
+    DeviceId device = DeviceId::kInvalid;
+    bool changed = false;
+  };
+  std::array<ToldKind, kMaxGuestUsers> told_kinds_ = {};
 };
 
 /// Create a default InputSystem with SDL + MnK + NOP drivers.
@@ -153,5 +175,7 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode);
 
 /// The runtime's InputSystem::SetPrimaryPressWindow, for a game's hooks; nothing without an input system.
 void SetPrimaryPressWindow(bool open);
+/// The runtime's InputSystem::TakeDeviceKindChange, for a game's hooks; false without an input system.
+bool TakeDeviceKindChange(uint32_t user_index);
 
 }  // namespace rex::input

@@ -205,6 +205,60 @@ TEST_CASE("Capabilities follow the controller in hand", "[input]") {
   REQUIRE(caps.sub_type == 2);
 }
 
+TEST_CASE("A controller resting off centre does not take back the slot", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  driver->Add(2);
+  // Pedals, a throttle or a whammy bar rest at the end of their travel.
+  driver->SetRightX(1, -32768);
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+
+  driver->SetButtons(2, X_INPUT_GAMEPAD_B);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  driver->SetButtons(2, 0);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+
+  X_INPUT_CAPABILITIES caps = {};
+  REQUIRE(system->GetCapabilities(0, 0, &caps) == X_ERROR_SUCCESS);
+  REQUIRE(caps.sub_type == 2);
+}
+
+TEST_CASE("A user played on another kind of controller is a kind change", "[input]") {
+  auto owned = std::make_unique<FakeDriver>();
+  FakeDriver* driver = owned.get();
+  auto system = std::make_unique<InputSystem>(nullptr);
+  system->AddDriver(std::move(owned));
+  system->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+  // FakeDriver reports its id as the subtype: a gamepad (1) and the keyboard's pad played as a guitar (6), user 0's.
+  driver->Add(1);
+  driver->Add(6, true);
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+
+  // Nothing pressed yet: the controller answers, and the guest keeps that answer.
+  X_INPUT_CAPABILITIES caps = {};
+  REQUIRE(system->GetCapabilities(0, 0, &caps) == X_ERROR_SUCCESS);
+  REQUIRE(caps.sub_type == 1);
+  REQUIRE_FALSE(system->TakeDeviceKindChange(0));
+
+  driver->SetButtons(6, X_INPUT_GAMEPAD_A);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->TakeDeviceKindChange(0));
+  REQUIRE_FALSE(system->TakeDeviceKindChange(0));
+  REQUIRE(system->GetCapabilities(0, 0, &caps) == X_ERROR_SUCCESS);
+  REQUIRE(caps.sub_type == 6);
+
+  // Back on the controller; asked again before it is taken, nothing is left to take.
+  driver->SetButtons(6, 0);
+  driver->SetButtons(1, X_INPUT_GAMEPAD_B);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(system->GetCapabilities(0, 0, &caps) == X_ERROR_SUCCESS);
+  REQUIRE(caps.sub_type == 1);
+  REQUIRE_FALSE(system->TakeDeviceKindChange(0));
+}
+
 TEST_CASE("A keystroke from the second controller reaches the guest", "[input]") {
   FakeDriver* driver = nullptr;
   auto system = SharedSystem(&driver);

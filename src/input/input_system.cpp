@@ -358,7 +358,60 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
     return result;
   }
   out_caps->sub_type = ReportedSubtype(DeviceInfoFor(chosen), out_caps->sub_type);
+  NoteToldKind(user_index, flags, chosen, out_caps->sub_type);
   return result;
+}
+
+void InputSystem::NoteToldKind(uint32_t user_index, uint32_t flags, DeviceId device, uint8_t subtype) {
+  if (user_index >= kMaxGuestUsers) {
+    return;
+  }
+  ToldKind& kind = told_kinds_[user_index];
+  if (!kind.told || kind.told_device != device || kind.subtype != subtype) {
+    const DeviceInfo* info = DeviceInfoFor(device);
+    REXLOG_INFO("Slot {}'s kind of controller, as the game is told: XInput subtype {} ({}).", user_index, subtype,
+                info && !info->name.empty() ? info->name : "?");
+  }
+  kind.told = true;
+  kind.flags = flags;
+  kind.told_device = device;
+  kind.subtype = subtype;
+  kind.device = device;
+  kind.changed = false;
+}
+
+void InputSystem::CheckToldKind(uint32_t user_index) {
+  if (user_index >= kMaxGuestUsers || !told_kinds_[user_index].told) {
+    return;
+  }
+  ToldKind& kind = told_kinds_[user_index];
+  const DeviceId chosen = ChooseDeviceForUser(user_index);
+  if (chosen == kind.device) {
+    return;
+  }
+  kind.device = chosen;
+  InputDriver* driver = DriverForDevice(chosen);
+  X_INPUT_CAPABILITIES caps = {};
+  if (!driver || driver->GetDeviceCapabilities(chosen, kind.flags, &caps) != X_ERROR_SUCCESS) {
+    kind.changed = false;
+    return;
+  }
+  const uint8_t subtype = ReportedSubtype(DeviceInfoFor(chosen), caps.sub_type);
+  kind.changed = subtype != kind.subtype;
+  if (kind.changed) {
+    const DeviceInfo* info = DeviceInfoFor(chosen);
+    REXLOG_INFO("Slot {} is played on another kind of controller now: XInput subtype {} ({}), the game was told {}.",
+                user_index, subtype, info && !info->name.empty() ? info->name : "?", kind.subtype);
+  }
+}
+
+bool InputSystem::TakeDeviceKindChange(uint32_t user_index) {
+  std::lock_guard lock(mutex_);
+  if (user_index >= kMaxGuestUsers || !told_kinds_[user_index].changed) {
+    return false;
+  }
+  told_kinds_[user_index].changed = false;
+  return true;
 }
 
 bool InputSystem::PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad) {
@@ -539,6 +592,7 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_stat
     merged.gamepad.thumb_rx = static_cast<int16_t>(whammy_rx);
   }
   UpdateConnectedUser(user_index, true);
+  CheckToldKind(user_index);
   AdjustDeadzoneLevels(user_index, &merged.gamepad);
   if (static_cast<uint16_t>(merged.gamepad.buttons) != 0 && user_index < kMaxGuestUsers) {
     last_used_user_ = user_index;
@@ -646,7 +700,9 @@ bool InputSystem::MakePrimary(uint32_t user_index) {
               "slot {}).",
               user_index, user_index);
 
-  // The guest asks for the controllers' kinds again (a guitar and a pad swapped).
+  // The guest is told the controllers changed (a guitar and a pad swapped). A guest that asks for their kinds only
+  // when one connects (Guitar Hero: Metallica takes no notice of this) learns of it through TakeDeviceKindChange: the
+  // users' next reads find their devices changed.
   if (auto* kernel_state = REX_KERNEL_STATE()) {
     kernel_state->BroadcastNotification(kXNotificationSystemInputDevicesChanged, 0);
   }
@@ -835,6 +891,15 @@ void SetPrimaryPressWindow(bool open) {
   if (auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system())) {
     input->SetPrimaryPressWindow(open);
   }
+}
+
+bool TakeDeviceKindChange(uint32_t user_index) {
+  auto* kernel_state = REX_KERNEL_STATE();
+  if (!kernel_state || !kernel_state->emulator()) {
+    return false;
+  }
+  auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system());
+  return input && input->TakeDeviceKindChange(user_index);
 }
 
 }  // namespace rex::input

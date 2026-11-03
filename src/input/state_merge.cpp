@@ -56,10 +56,31 @@ bool IsNeutral(const X_INPUT_GAMEPAD& gamepad) {
 
 void ActiveDeviceTracker::Observe(uint32_t user_index, DeviceId id,
                                   const X_INPUT_GAMEPAD& gamepad) {
-  if (user_index >= kMaxGuestUsers || IsNeutral(gamepad)) {
+  if (user_index >= kMaxGuestUsers) {
     return;
   }
-  active_[user_index] = id;
+  // A device's first read finds its triggers and sticks at rest; its buttons rest released.
+  auto [it, first] = previous_.try_emplace(id, gamepad);
+  X_INPUT_GAMEPAD before = it->second;
+  if (first) {
+    before.buttons = 0;
+  }
+  it->second = gamepad;
+  const uint16_t pressed = static_cast<uint16_t>(static_cast<uint16_t>(gamepad.buttons) &
+                                                 ~static_cast<uint16_t>(before.buttons));
+  auto trigger_left_rest = [](uint8_t was, uint8_t now) {
+    return was < kTriggerThreshold && now >= kTriggerThreshold;
+  };
+  auto stick_left_rest = [](int16_t was, int16_t now) { return !PastDeadzone(was) && PastDeadzone(now); };
+  const bool moved = pressed != 0 || trigger_left_rest(before.left_trigger, gamepad.left_trigger) ||
+                     trigger_left_rest(before.right_trigger, gamepad.right_trigger) ||
+                     stick_left_rest(before.thumb_lx, gamepad.thumb_lx) ||
+                     stick_left_rest(before.thumb_ly, gamepad.thumb_ly) ||
+                     stick_left_rest(before.thumb_rx, gamepad.thumb_rx) ||
+                     stick_left_rest(before.thumb_ry, gamepad.thumb_ry);
+  if (moved) {
+    active_[user_index] = id;
+  }
 }
 
 DeviceId ActiveDeviceTracker::Active(uint32_t user_index) const {
@@ -70,6 +91,7 @@ DeviceId ActiveDeviceTracker::Active(uint32_t user_index) const {
 }
 
 void ActiveDeviceTracker::Forget(DeviceId id) {
+  previous_.erase(id);
   for (auto& active : active_) {
     if (active == id) {
       active = DeviceId::kInvalid;
