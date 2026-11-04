@@ -399,7 +399,9 @@ void WasapiExclusiveDriver::SubmitFrame(uint32_t frame_ptr) {
     std::unique_lock lock(frames_mutex_);
     if (REXCVAR_GET(audio_keep_time)) {
       last_submit_ = std::chrono::steady_clock::now();
-      if (owed_frames_.load(std::memory_order_relaxed)) {
+      // As the SDL driver: only while another frame is queued for the device (dropping the one it waits for would
+      // play more silence, owed in turn).
+      if (owed_frames_.load(std::memory_order_relaxed) && !frames_queued_.empty()) {
         // As the SDL driver: dropped for the silence already played, and the next one asked for at once.
         const uint32_t owed = owed_frames_.fetch_sub(1, std::memory_order_relaxed) - 1;
         ++dropped_frames_;

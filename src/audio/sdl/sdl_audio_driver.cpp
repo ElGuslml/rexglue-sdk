@@ -28,8 +28,9 @@ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
 REXCVAR_DEFINE_BOOL(audio_keep_time, false, "Audio",
                     "The sound keeps real time when the game's audio comes late: each frame of silence the device "
                     "played for want of the game's (its audio thread held up longer than the queue lasts) is made up "
-                    "by dropping one of the game's next frames, a short skip instead of the sound staying that much "
-                    "behind (a music game's notes do not wait). Off: the silence delays the rest of the sound");
+                    "by dropping one of the game's next frames (while the device has another of them to play), a short "
+                    "skip instead of the sound staying that much behind (a music game's notes do not wait). Off: the "
+                    "silence delays the rest of the sound");
 
 namespace rex::audio::sdl {
 
@@ -125,7 +126,12 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
   if (REXCVAR_GET(audio_keep_time)) {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     last_submit_ = std::chrono::steady_clock::now();
-    if (owed_frames_.load(std::memory_order_relaxed)) {
+    // Only while the device has as many of the client's frames to play as it takes at once: dropping one it is about
+    // to take would play more silence, owed in turn, and a client barely faster than the device then fell into long
+    // silences (the catch-up only as fast as the client outran the device). At most 3 kept: the shared output queues at
+    // least 4 frames, and the one being submitted holds one.
+    const uint32_t keep = std::clamp<uint32_t>(burst_frames_.load(std::memory_order_relaxed), 1, 3);
+    if (owed_frames_.load(std::memory_order_relaxed) && frames_queued_.size() >= keep) {
       // The device already played silence in this frame's time: dropped, and the client asked for the next one at
       // once (the semaphore it took for this one, given back).
       const uint32_t owed = owed_frames_.fetch_sub(1, std::memory_order_relaxed) - 1;
@@ -214,7 +220,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
   const StereoFold fold = GetStereoFold();
   const SurroundMix mix = GetSurroundMix();
   const float gain = GetOutputGain();
+  uint32_t taken = 0;  // frames given to SDL in this call, silent or not
   while (additional_amount > 0) {
+    ++taken;
     static uint32_t sdl_callback_count = 0;
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
     if (driver->frames_queued_.empty()) {
@@ -265,6 +273,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       assert_true(ret);
       additional_amount -= len;
     }
+  }
+  if (taken > driver->burst_frames_.load(std::memory_order_relaxed)) {
+    driver->burst_frames_.store(taken, std::memory_order_relaxed);
   }
   SDL_stack_free(data);
 }

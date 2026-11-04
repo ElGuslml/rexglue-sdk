@@ -57,6 +57,8 @@ class SDLAudioDriver : public AudioDriver {
   // next frames to drop; the frames dropped so far in this catch-up; the client's last frame.
   std::atomic<uint32_t> owed_frames_{0};
   uint32_t dropped_frames_ = 0;
+  // The most frames SDL has taken in one call (2 on a 10 ms WASAPI period): as many stay queued while catching up.
+  std::atomic<uint32_t> burst_frames_{1};
   std::chrono::steady_clock::time_point last_submit_ = {};
 };
 
