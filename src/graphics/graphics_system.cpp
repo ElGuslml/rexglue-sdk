@@ -40,7 +40,11 @@
 
 #if REX_PLATFORM_WIN32
 #include <dxgi.h>
+#include <immintrin.h>
 #include <wrl/client.h>
+#include <atomic>
+#include <cwchar>
+#include <vector>
 #endif
 
 REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
@@ -53,6 +57,14 @@ REXCVAR_DEFINE_BOOL(vblank_follows_display, false, "GPU",
                     "fraction of it: the game's frames in step with the display's refreshes, where a timer's rate "
                     "drifts from them (a frame dropped or shown twice every few seconds). The timer otherwise, and "
                     "while the display gives no vertical blank");
+
+REXCVAR_DEFINE_INT32(vblank_timer_spin_us, 0, "GPU",
+                     "With vsync and the vertical blank on its timer: how long before each tick the timer's thread "
+                     "stops sleeping and spins, in microseconds, for ticks within a few of them of their time (a "
+                     "high resolution timer's sleep ends up to half a millisecond late). 0: no spin. A variable "
+                     "refresh rate display (G-Sync, FreeSync) shows each frame when it comes, so the ticks' "
+                     "regularity is the frames'")
+    .range(0, 2000);
 
 REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
                     "Store shaders persistently and load them when loading games to avoid "
@@ -95,6 +107,9 @@ class DisplayVblank {
   // About once a second: the window's monitor, its refresh rate, and how many of its vertical blanks make one of
   // the guest's (0: they do not fit, within 2 %, and the timer keeps the guest's rate).
   void Update(double guest_hz) {
+    // Under a variable refresh rate display's most, by this fraction (0.3 Hz at 120, 0.4 at 160): far above the
+    // ticks' jitter with vblank_timer_spin_us and the clocks' drift, far below a frame rate anyone sees.
+    constexpr double kVariableMargin = 0.0025;
     HWND hwnd = nullptr;
     if (rex::Runtime* runtime = rex::Runtime::instance()) {
       if (rex::ui::Window* window = runtime->display_window()) {
@@ -119,6 +134,7 @@ class DisplayVblank {
     if (monitor != monitor_ || hz != hz_) {
       variable_ = false;
       intervals_filled_ = 0;
+      exact_hz_ = ExactRefresh(info.szDevice);
     }
     // Followed, a variable refresh rate display (G-Sync, FreeSync) refreshes when the game's frame arrives, and the
     // game waits for that refresh to start the next: each frame would take its render time plus a refresh. Its
@@ -136,6 +152,12 @@ class DisplayVblank {
     if (variable_) {
       divisor = 0;
     }
+    const double display_hz = exact_hz_ > 0.0 ? exact_hz_ : double(hz);
+    const double timer_hz = variable_ && display_hz > 0.0 && guest_hz > display_hz * (1.0 - kVariableMargin)
+                                ? display_hz * (1.0 - kVariableMargin)
+                                : guest_hz;
+    const bool timer_changed = timer_hz != timer_hz_.load(std::memory_order_relaxed);
+    timer_hz_.store(timer_hz, std::memory_order_relaxed);
     if (monitor != monitor_ || (divisor && !output_)) {
       output_.Reset();
       intervals_filled_ = 0;
@@ -151,7 +173,7 @@ class DisplayVblank {
       output_.Reset();
     }
     const uint32_t following = output_ ? divisor : 0;
-    if (monitor != monitor_ || hz != hz_ || following != divisor_) {
+    if (monitor != monitor_ || hz != hz_ || following != divisor_ || timer_changed) {
       if (following) {
         std::string device;
         for (const wchar_t* c = info.szDevice; *c; ++c) {
@@ -159,6 +181,10 @@ class DisplayVblank {
         }
         REXLOG_INFO("[vblank] following the display's vertical blank: {} at {} Hz, one in {} for {:.0f} Hz", device,
                     hz, following, guest_hz);
+      } else if (variable_ && timer_hz != guest_hz) {
+        REXLOG_INFO("[vblank] the timer at {:.2f} Hz: the display follows the game's frames up to its {:.3f} Hz, "
+                    "and the frames come a little under that ({:.0f} chosen)",
+                    timer_hz, display_hz, guest_hz);
       } else {
         REXLOG_INFO("[vblank] the timer at {:.0f} Hz: the display {} Hz {}", guest_hz, hz,
                     variable_  ? "follows the game's frames"
@@ -175,6 +201,12 @@ class DisplayVblank {
 
   uint32_t divisor() const { return divisor_; }
   std::chrono::nanoseconds period() const { return period_; }
+  // The rate the timer keeps for this display: the guest's, or on a variable refresh rate display a little under
+  // the most it shows (its exact refresh rate). At that rate or above, frames come faster than the panel can show
+  // them now and then (the two clocks drift; the ticks have their jitter), and with vsync they wait in the swap
+  // chain's queue: a frame shown late, then the queue full and the game held back, again and again (Gustavo's frame
+  // time graph: a saw tooth for a few seconds, then even). Under it, the panel shows each frame when it comes.
+  double timer_hz() const { return timer_hz_.load(std::memory_order_relaxed); }
 
   // Waits up to `timeout` for the display's vertical blanks since the previous call: how many (0 on a timeout).
   uint64_t Wait(std::chrono::nanoseconds timeout) {
@@ -186,6 +218,36 @@ class DisplayVblank {
   }
 
  private:
+  // The display's refresh rate as the system keeps it (159.962 for a "160 Hz" monitor; EnumDisplaySettings rounds
+  // it), 0 if unknown.
+  static double ExactRefresh(const wchar_t* device) {
+    UINT32 path_count = 0;
+    UINT32 mode_count = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) != ERROR_SUCCESS) {
+      return 0.0;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr) !=
+        ERROR_SUCCESS) {
+      return 0.0;
+    }
+    for (UINT32 i = 0; i < path_count; ++i) {
+      DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
+      source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+      source.header.size = sizeof(source);
+      source.header.adapterId = paths[i].sourceInfo.adapterId;
+      source.header.id = paths[i].sourceInfo.id;
+      if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
+          std::wcscmp(source.viewGdiDeviceName, device) != 0) {
+        continue;
+      }
+      const DISPLAYCONFIG_RATIONAL& rate = paths[i].targetInfo.refreshRate;
+      return rate.Denominator ? double(rate.Numerator) / double(rate.Denominator) : 0.0;
+    }
+    return 0.0;
+  }
+
   static Microsoft::WRL::ComPtr<IDXGIOutput> OutputForMonitor(IDXGIFactory1* factory, HMONITOR monitor) {
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     for (UINT a = 0; SUCCEEDED(factory->EnumAdapters(a, adapter.ReleaseAndGetAddressOf())); ++a) {
@@ -250,6 +312,8 @@ class DisplayVblank {
   size_t intervals_next_ = 0;
   size_t intervals_filled_ = 0;
   bool variable_ = false;
+  double exact_hz_ = 0.0;
+  std::atomic<double> timer_hz_{0.0};
   std::thread thread_;
 };
 #endif  // REX_PLATFORM_WIN32
@@ -355,6 +419,7 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
+        [[maybe_unused]] double timer_hz = refresh_rate_hz;
 #if REX_PLATFORM_WIN32
         // vblank_follows_display: the display's vertical blanks while they fit the guest's rate; the timer below
         // otherwise, and for a second after the display gave none within three of its periods.
@@ -374,6 +439,12 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             if (now - display_checked >= std::chrono::seconds(1)) {
               display_checked = now;
               display->Update(refresh_rate_hz);
+              // The timer's rate for this display (a variable refresh rate display's: a little under its most).
+              const double hz = display->timer_hz() > 0.0 ? display->timer_hz() : refresh_rate_hz;
+              if (hz != timer_hz) {
+                timer_hz = hz;
+                vsync_interval_ticks = std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / timer_hz));
+              }
             }
             if (display->divisor() && now >= display_timer_until) {
               if (display_drain) {
@@ -395,6 +466,10 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             display_drain = true;
           } else if (display) {
             display.reset();
+            if (timer_hz != refresh_rate_hz) {
+              timer_hz = refresh_rate_hz;
+              vsync_interval_ticks = std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / timer_hz));
+            }
           }
 #endif
           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
@@ -404,7 +479,29 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
             MarkVblank();
             last_frame_time += interval_ticks;
           }
-          rex::thread::Sleep(std::chrono::milliseconds(1));
+          // Until the next tick. Sleep(1) wakes on the system timer's millisecond: the ticks 6 to 10 ms apart at
+          // 120 Hz, which a fixed refresh display's vsync evens out and a variable refresh rate display shows as
+          // they come. A high resolution timer instead (up to half a millisecond late: 7.9 to 8.8 ms), then
+          // vblank_timer_spin_us of spinning (700: 8.30 to 8.36 ms; measured on Gustavo's PC). One wake a tick, not
+          // one a millisecond. A tick far away (vsync turned on, a long stall) is waited for in steps, so the
+          // display's checks above keep their second.
+          const int32_t spin_us = REXCVAR_GET(vsync) ? std::clamp(REXCVAR_GET(vblank_timer_spin_us), 0, 2000) : 0;
+          const uint64_t next = last_frame_time + interval_ticks;
+          current_time = chrono::Clock::QueryGuestTickCount();
+          if (!REXCVAR_GET(vsync) || next <= current_time) {
+            rex::thread::Sleep(std::chrono::milliseconds(REXCVAR_GET(vsync) ? 0 : 1));
+            continue;
+          }
+          const int64_t remaining_us = int64_t((next - current_time) * 1000000 / guest_tick_frequency);
+          const int64_t sleep_us = std::min<int64_t>(remaining_us - spin_us, 100000);
+          if (sleep_us > 0) {
+            rex::thread::PreciseSleep(std::chrono::microseconds(sleep_us));
+          }
+          if (spin_us > 0 && remaining_us <= 100000 + spin_us) {
+            while (vsync_worker_running_ && chrono::Clock::QueryGuestTickCount() < next) {
+              _mm_pause();
+            }
+          }
         }
         return 0;
       }));
