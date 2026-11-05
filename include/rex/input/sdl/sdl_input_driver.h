@@ -48,9 +48,10 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   // The Xbox 360 controls gamepad_remap can move: A B X Y LB RB LT RT LS RS Start Back Guide (the D-pad stays).
   static constexpr int kRemapControls = 13;
 
-  // A whammy bar a launcher calibrated (gamepad_whammy_calibration): the SDL_GamepadAxis it is on, and that axis's
-  // SDL value at rest and pressed all the way.
-  struct WhammyCalibration {
+  // A whammy bar or a tilt a launcher calibrated (gamepad_whammy_calibration, gamepad_tilt_calibration): the
+  // SDL_GamepadAxis it is on, or past them the accelerometer's axis, and that source's value at rest and at its other
+  // end (an accelerometer's in thousandths of m/s2).
+  struct AxisCalibration {
     int axis = -1;  // -1: none
     int32_t rest = 0;
     int32_t full = 0;
@@ -94,7 +95,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     // guitar_whammy_rest).
     bool whammy_unknown;
     // Its calibrated whammy bar: the right stick's X is that axis, from rest (-32768) to all the way (32767).
-    WhammyCalibration whammy;
+    AxisCalibration whammy;
+    // Its calibrated tilt: the right stick's Y is that source, from 0 at rest to 32767 tilted.
+    AxisCalibration tilt;
     // Where its right stick's X rests (a gamepad played as a guitar, gamepad_whammy_rest: a guitar that reports
     // itself as a gamepad rests its bar at -32768, a stick in the middle), and since when the axis has stayed near
     // `right_x_still_value` (empty: it has reported nothing yet).
@@ -116,6 +119,7 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void OnControllerDeviceRemovedLocked(const SDL_Event& event);
   void OnControllerDeviceAxisMotionLocked(const SDL_Event& event);
   void OnControllerDeviceButtonChangedLocked(const SDL_Event& event);
+  void OnControllerDeviceSensorLocked(const SDL_Event& event);
 
   inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(SDL_JoystickID instance_id);

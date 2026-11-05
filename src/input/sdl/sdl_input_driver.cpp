@@ -48,6 +48,12 @@ REXCVAR_DEFINE_STRING(gamepad_whammy_calibration, "", "Input",
                       "controller named as in gamepad_device_remap, axis one of lx ly rx ry lt rt, rest and full the "
                       "axis's SDL values with the bar at rest and pressed all the way. The right stick's X is then "
                       "that axis, from -32768 at rest to 32767");
+REXCVAR_DEFINE_STRING(gamepad_tilt_calibration, "", "Input",
+                      "Tilts a launcher calibrated: controller=source:rest:full entries separated by commas, a "
+                      "controller named as in gamepad_device_remap, source one of lx ly rx ry lt rt or ax ay az (the "
+                      "controller's accelerometer, in thousandths of m/s2), rest and full its values at rest and "
+                      "tilted. The right stick's Y, a guitar's tilt, is then that source, from 0 at rest to 32767 a "
+                      "fifth short of full");
 REXCVAR_DEFINE_BOOL(
     guitar_whammy_rest, false, "Input",
     "A guitar's whammy bar (the right stick's X axis) is at rest, -32768, until the guitar "
@@ -255,10 +261,14 @@ std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType ty
 }
 
 // gamepad_whammy_calibration's entry for a controller: its serial number's, else its GUID's.
-SDLInputDriver::WhammyCalibration WhammyCalibrationFor(std::string_view serial, std::string_view guid) {
-  constexpr const char* kAxes[] = {"lx", "ly", "rx", "ry", "lt", "rt"};  // SDL_GamepadAxis's order
-  std::optional<SDLInputDriver::WhammyCalibration> by_serial, by_guid;
-  ForEachPiece(REXCVAR_GET(gamepad_whammy_calibration), ',', [&](std::string_view entry) {
+// Past SDL_GamepadAxis, the accelerometer's axes.
+constexpr int kAccelSource = SDL_GAMEPAD_AXIS_COUNT;
+
+SDLInputDriver::AxisCalibration AxisCalibrationFor(const std::string& text, std::string_view serial,
+                                                   std::string_view guid) {
+  constexpr const char* kAxes[] = {"lx", "ly", "rx", "ry", "lt", "rt", "ax", "ay", "az"};
+  std::optional<SDLInputDriver::AxisCalibration> by_serial, by_guid;
+  ForEachPiece(text, ',', [&](std::string_view entry) {
     size_t equals = entry.rfind('=');
     if (equals == std::string_view::npos) {
       return;
@@ -270,7 +280,7 @@ SDLInputDriver::WhammyCalibration WhammyCalibrationFor(std::string_view serial, 
     if (second == std::string_view::npos) {
       return;
     }
-    SDLInputDriver::WhammyCalibration calibration;
+    SDLInputDriver::AxisCalibration calibration;
     std::string_view axis = Trim(value.substr(0, first));
     for (int i = 0; i < int(std::size(kAxes)); ++i) {
       if (EqualsCI(axis, kAxes[i])) {
@@ -283,7 +293,7 @@ SDLInputDriver::WhammyCalibration WhammyCalibrationFor(std::string_view serial, 
         std::from_chars(rest.data(), rest.data() + rest.size(), calibration.rest).ec != std::errc() ||
         std::from_chars(full.data(), full.data() + full.size(), calibration.full).ec != std::errc() ||
         calibration.rest == calibration.full) {
-      REXLOG_WARN("gamepad_whammy_calibration: '{}' is not axis:rest:full", value);
+      REXLOG_WARN("A controller's calibration: '{}' is not source:rest:full", value);
       return;
     }
     if (!serial.empty() && EqualsCI(controller, serial)) {
@@ -292,14 +302,22 @@ SDLInputDriver::WhammyCalibration WhammyCalibrationFor(std::string_view serial, 
       by_guid = calibration;
     }
   });
-  return by_serial ? *by_serial : by_guid ? *by_guid : SDLInputDriver::WhammyCalibration{};
+  return by_serial ? *by_serial : by_guid ? *by_guid : SDLInputDriver::AxisCalibration{};
 }
 
 // A calibrated bar's position as the right stick's X: from -32768 at rest to 32767 all the way.
-int16_t CalibratedWhammy(const SDLInputDriver::WhammyCalibration& calibration, int32_t value) {
+int16_t CalibratedWhammy(const SDLInputDriver::AxisCalibration& calibration, int32_t value) {
   double t = double(value - calibration.rest) / double(calibration.full - calibration.rest);
   t = std::clamp(t, 0.0, 1.0);
   return static_cast<int16_t>(std::lround(-32768.0 + t * 65535.0));
+}
+
+// A calibrated tilt as the right stick's Y: 0 at rest, 32767 from a fifth short of where it was held. Guitar Hero:
+// Metallica's star_tilt_threshold is -1.0 of the axis, so it takes the stick at its very end (98 %, 32256): an Xbox 360
+// guitar's accelerometer saturates well before that, but a scale that ends at the position held would rarely get there.
+int16_t CalibratedTilt(const SDLInputDriver::AxisCalibration& calibration, int32_t value) {
+  double t = double(value - calibration.rest) / double(calibration.full - calibration.rest) / 0.8;
+  return static_cast<int16_t>(std::lround(std::clamp(t, 0.0, 1.0) * 32767.0));
 }
 
 // A PS3 Guitar Hero guitar: USB 12BA:0100, the ID that console's games look for, so a CRKD guitar should report it on
@@ -307,7 +325,7 @@ int16_t CalibratedWhammy(const SDLInputDriver::WhammyCalibration& calibration, i
 // yellow and blue: as SDL's West and North they reach a game as X and Y, which are blue and yellow on an Xbox 360 guitar.
 // Its bar rests at the middle of the axis (0x7F or 0x80, 0xFF all the way) and an axis at 0 is read as half pressed.
 // PlasticBand's documentation of the protocol: Docs/Instruments/5-Fret Guitar/Guitar Hero/PS3.md.
-constexpr SDLInputDriver::WhammyCalibration kPs3GuitarWhammy{SDL_GAMEPAD_AXIS_RIGHTX, 128, 32767};
+constexpr SDLInputDriver::AxisCalibration kPs3GuitarWhammy{SDL_GAMEPAD_AXIS_RIGHTX, 128, 32767};
 
 // The same report through DirectInput, for a guitar SDL's PS3 driver did not take (that driver asks the device for a
 // feature report first): without a mapping of its own it is no gamepad at all.
@@ -904,6 +922,9 @@ void SDLInputDriver::ProcessEventLocked(const SDL_Event& event) {
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
       OnControllerDeviceButtonChangedLocked(event);
       break;
+    case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+      OnControllerDeviceSensorLocked(event);
+      break;
     default:
       break;
   }
@@ -976,7 +997,16 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
                 SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
   }
   UpdateXCapabilities(state);
-  state.whammy = WhammyCalibrationFor(serial ? serial : "", guid_text);
+  state.whammy = AxisCalibrationFor(REXCVAR_GET(gamepad_whammy_calibration), serial ? serial : "", guid_text);
+  state.tilt = AxisCalibrationFor(REXCVAR_GET(gamepad_tilt_calibration), serial ? serial : "", guid_text);
+  if (state.tilt.axis >= 0) {
+    REXLOG_INFO("SDL OnControllerDeviceAdded: tilt calibrated (gamepad_tilt_calibration): source {}, {} at rest, {} "
+                "tilted.",
+                state.tilt.axis, state.tilt.rest, state.tilt.full);
+    if (state.tilt.axis >= kAccelSource && !SDL_SetGamepadSensorEnabled(controller, SDL_SENSOR_ACCEL, true)) {
+      REXLOG_WARN("SDL OnControllerDeviceAdded: the accelerometer did not start: {}", SDL_GetError());
+    }
+  }
   if (state.whammy.axis >= 0) {
     state.state.gamepad.thumb_rx = INT16_MIN;
     REXLOG_INFO("SDL OnControllerDeviceAdded: whammy bar calibrated (gamepad_whammy_calibration): SDL axis {}, {} at "
@@ -1037,6 +1067,9 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
   if (controller.whammy.axis == event.gaxis.axis) {
     pad.thumb_rx = CalibratedWhammy(controller.whammy, event.gaxis.value);
   }
+  if (controller.tilt.axis == event.gaxis.axis) {
+    pad.thumb_ry = CalibratedTilt(controller.tilt, event.gaxis.value);
+  }
   switch (event.gaxis.axis) {
     case SDL_GAMEPAD_AXIS_LEFTX:
       pad.thumb_lx = event.gaxis.value;
@@ -1065,6 +1098,9 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
       pad.thumb_rx = event.gaxis.value;
       break;
     case SDL_GAMEPAD_AXIS_RIGHTY:
+      if (controller.tilt.axis >= 0) {
+        break;  // the calibrated tilt's, above
+      }
       pad.thumb_ry = ~event.gaxis.value;
       break;
     // The triggers go through gamepad_remap, like the buttons.
@@ -1081,6 +1117,24 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
       break;
   }
   controller.state_changed = true;
+}
+
+void SDLInputDriver::OnControllerDeviceSensorLocked(const SDL_Event& event) {
+  auto idx = GetControllerIndexFromInstanceID(event.gsensor.which);
+  if (!idx) {
+    return;
+  }
+  auto& controller = controllers_.at(*idx);
+  const int source = controller.tilt.axis - kAccelSource;
+  if (source < 0 || event.gsensor.sensor != SDL_SENSOR_ACCEL) {
+    return;
+  }
+  const int16_t tilt =
+      CalibratedTilt(controller.tilt, static_cast<int32_t>(std::lround(event.gsensor.data[source] * 1000.0f)));
+  if (static_cast<int16_t>(controller.state.gamepad.thumb_ry) != tilt) {
+    controller.state.gamepad.thumb_ry = tilt;
+    controller.state_changed = true;
+  }
 }
 
 void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& event) {
