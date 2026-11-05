@@ -53,6 +53,11 @@ REXCVAR_DEFINE_BOOL(
     "A guitar's whammy bar (the right stick's X axis) is at rest, -32768, until the guitar "
     "reports a position: an Xbox 360 guitar reads 0 there, half pressed, until the bar first "
     "moves. For a game that plays guitars; in another the bar at rest is the stick held left");
+REXCVAR_DEFINE_BOOL(
+    guitar_ps3_protocol, false, "Input",
+    "A PS3 Guitar Hero guitar (USB 12BA:0100, as a CRKD guitar on its P3 setting should be) plays as an Xbox 360 "
+    "guitar: yellow and blue, swapped on that protocol, put right, and its whammy bar at rest at the middle of its "
+    "axis. A launcher's calibration of the bar still wins. For a game that plays guitars");
 
 namespace rex::input::sdl {
 
@@ -295,6 +300,47 @@ int16_t CalibratedWhammy(const SDLInputDriver::WhammyCalibration& calibration, i
   double t = double(value - calibration.rest) / double(calibration.full - calibration.rest);
   t = std::clamp(t, 0.0, 1.0);
   return static_cast<int16_t>(std::lround(-32768.0 + t * 65535.0));
+}
+
+// A PS3 Guitar Hero guitar: USB 12BA:0100, the ID that console's games look for, so a CRKD guitar should report it on
+// its P3 setting too. SDL's PS3 driver reads its report as a DualShock 3's, whose Square and Triangle bits are this guitar's
+// yellow and blue: as SDL's West and North they reach a game as X and Y, which are blue and yellow on an Xbox 360 guitar.
+// Its bar rests at the middle of the axis (0x7F or 0x80, 0xFF all the way) and an axis at 0 is read as half pressed.
+// PlasticBand's documentation of the protocol: Docs/Instruments/5-Fret Guitar/Guitar Hero/PS3.md.
+constexpr SDLInputDriver::WhammyCalibration kPs3GuitarWhammy{SDL_GAMEPAD_AXIS_RIGHTX, 128, 32767};
+
+// The same report through DirectInput, for a guitar SDL's PS3 driver did not take (that driver asks the device for a
+// feature report first): without a mapping of its own it is no gamepad at all.
+constexpr char kPs3GuitarDirectInput[] =
+    "PS3 Guitar Hero guitar,a:b1,b:b2,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,"
+    "leftstick:b10,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,rightx:a2,righty:a3,start:b9,x:b3,y:b0,";
+
+bool IsPs3Guitar(uint16_t vendor, uint16_t product) {
+  return REXCVAR_GET(guitar_ps3_protocol) && vendor == 0x12BA && product == 0x0100;
+}
+
+// Its mapping with yellow and blue put right. SDL's own has x:b2 and y:b3; any other (swapped already, when the guitar
+// reconnects, or one from hid_mappings_file) stays as it is.
+void MapPs3Guitar(SDL_JoystickID id, const char* guid) {
+  std::string mapping;
+  if (char* current = SDL_GetGamepadMappingForID(id)) {
+    mapping = current;
+    SDL_free(current);
+    const size_t x = mapping.find(",x:b2,");
+    const size_t y = mapping.find(",y:b3,");
+    if (x == std::string::npos || y == std::string::npos) {
+      return;
+    }
+    mapping[x + 4] = '3';
+    mapping[y + 4] = '2';
+  } else {
+    mapping = std::string(guid) + "," + kPs3GuitarDirectInput;
+  }
+  if (SDL_SetGamepadMapping(id, mapping.c_str())) {
+    REXLOG_INFO("SDL: a PS3 Guitar Hero guitar: yellow and blue put right, its whammy bar at rest at the axis's middle.");
+  } else {
+    REXLOG_WARN("SDL: a PS3 Guitar Hero guitar's mapping failed: {}", SDL_GetError());
+  }
 }
 
 // A gamepad's right stick's X has stayed within this of where it was for this long: it rests there, a whammy bar's
@@ -876,6 +922,12 @@ void SDLInputDriver::OnJoystickDeviceAddedLocked(const SDL_Event& event) {
       "HasGamepadMapping({})",
       name ? name : "?", SDL_GetJoystickVendorForID(id), SDL_GetJoystickProductForID(id), guid_text,
       is_gamepad);
+  // Before the gamepad's event, which comes next: the mapping is read when it is opened (without one, SDL sends the
+  // gamepad's event as the mapping is set).
+  if (IsPs3Guitar(SDL_GetJoystickVendorForID(id), SDL_GetJoystickProductForID(id))) {
+    MapPs3Guitar(id, guid_text);
+    return;
+  }
   if (!is_gamepad) {
     REXLOG_WARN(
         "SDL JoystickAdded: \"{}\" has no gamepad mapping, so it will not be usable. Add one to "
@@ -930,6 +982,9 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
     REXLOG_INFO("SDL OnControllerDeviceAdded: whammy bar calibrated (gamepad_whammy_calibration): SDL axis {}, {} at "
                 "rest, {} all the way.",
                 state.whammy.axis, state.whammy.rest, state.whammy.full);
+  } else if (IsPs3Guitar(SDL_GetGamepadVendor(controller), SDL_GetGamepadProduct(controller))) {
+    state.whammy = kPs3GuitarWhammy;
+    state.state.gamepad.thumb_rx = INT16_MIN;
   } else if (joy_type == SDL_JOYSTICK_TYPE_GUITAR && REXCVAR_GET(guitar_whammy_rest)) {
     state.whammy_unknown = true;
     state.state.gamepad.thumb_rx = INT16_MIN;
