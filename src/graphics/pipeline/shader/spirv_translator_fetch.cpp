@@ -978,8 +978,12 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       coordinates[coordinate_component_index] = coordinates_operand;
     }
     spv::Id texture_resolution_scaled = spv::NoResult;
-    uint32_t revert_resolution_scale_axes = uint32_t(shader_resolution_scale_x_ > 1.0f) |
-                                            (uint32_t(shader_resolution_scale_y_ > 1.0f) << 1);
+    // With SetDynamicResolutionScale both axes, the scale read from the system constants (1 where the
+    // draw is not scaled, which reverts nothing).
+    uint32_t revert_resolution_scale_axes =
+        dynamic_resolution_scale_ ? 0b011
+                                  : uint32_t(shader_resolution_scale_x_ > 1.0f) |
+                                        (uint32_t(shader_resolution_scale_y_ > 1.0f) << 1);
     spv::Id const_texture_resolution_scale[] = {spv::NoResult, spv::NoResult};
     spv::Id const_texture_resolution_scale_reciprocal[] = {spv::NoResult, spv::NoResult};
     if (revert_resolution_scale_axes) {
@@ -994,15 +998,30 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, textures_resolution_scaled,
                                 builder_->makeUintConstant(UINT32_C(1) << fetch_constant_index)),
           const_uint_0_);
-      if (revert_resolution_scale_axes & 0b001) {
-        const_texture_resolution_scale[0] = builder_->makeFloatConstant(shader_resolution_scale_x_);
-        const_texture_resolution_scale_reciprocal[0] =
-            builder_->makeFloatConstant(1.0f / shader_resolution_scale_x_);
-      }
-      if (revert_resolution_scale_axes & 0b010) {
-        const_texture_resolution_scale[1] = builder_->makeFloatConstant(shader_resolution_scale_y_);
-        const_texture_resolution_scale_reciprocal[1] =
-            builder_->makeFloatConstant(1.0f / shader_resolution_scale_y_);
+      if (dynamic_resolution_scale_) {
+        // texture_resolution_scale: xy the scale, zw its reciprocal.
+        for (int i = 0; i < 4; ++i) {
+          id_vector_temp_.clear();
+          id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantTextureResolutionScale));
+          id_vector_temp_.push_back(builder_->makeIntConstant(i));
+          spv::Id component = builder_->createLoad(
+              builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
+                                          id_vector_temp_),
+              spv::NoPrecision);
+          (i < 2 ? const_texture_resolution_scale[i]
+                 : const_texture_resolution_scale_reciprocal[i - 2]) = component;
+        }
+      } else {
+        if (revert_resolution_scale_axes & 0b001) {
+          const_texture_resolution_scale[0] = builder_->makeFloatConstant(shader_resolution_scale_x_);
+          const_texture_resolution_scale_reciprocal[0] =
+              builder_->makeFloatConstant(1.0f / shader_resolution_scale_x_);
+        }
+        if (revert_resolution_scale_axes & 0b010) {
+          const_texture_resolution_scale[1] = builder_->makeFloatConstant(shader_resolution_scale_y_);
+          const_texture_resolution_scale_reciprocal[1] =
+              builder_->makeFloatConstant(1.0f / shader_resolution_scale_y_);
+        }
       }
     }
 

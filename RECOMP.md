@@ -108,6 +108,7 @@ decisions (`native_x_renderer/docs/decisions.md`).
 | 31 | A renderer on its own thread can hold the command processor's signals to the game (D71) |
 | 32 | `SharedMemory::RequestRanges` keeps its merged ranges between calls (D84) |
 | 33 | The guest's swaps are counted, and a renderer is told when one executes (D86) |
+| 73 | The SPIR-V translator can read the resolution scale it reverts from the system constants (`SetDynamicResolutionScale`: `texture_resolution_scale`, `pixel_position_scale_reciprocal`), so one translation serves every scale and each draw gives its own (D128). The members are declared only in that mode: without it every translation is byte for byte what it was (checked on the stored shaders of ten games) |
 
 ## For the games
 

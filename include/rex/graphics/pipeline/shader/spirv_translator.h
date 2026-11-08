@@ -307,6 +307,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
     uint32_t vertex_index_max;
     float tessellation_factor_range_min;
     float tessellation_factor_range_max;
+
+    // Only with SetDynamicResolutionScale (declared in the shaders only then): the scale the shaders
+    // revert, as constants of the draw. xy: the scale of the resolution-scaled textures
+    // (textures_resolution_scaled), zw: its reciprocal.
+    float texture_resolution_scale[4];
+    // The reciprocal of the scale of the draw's own render target, which the pixel position of parameter
+    // generation reverts.
+    float pixel_position_scale_reciprocal[2];
   };
 
   enum ConstantBuffer : uint32_t {
@@ -422,6 +430,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
     shader_resolution_scale_x_ = scale_x > 1.0f ? scale_x : 1.0f;
     shader_resolution_scale_y_ = scale_y > 1.0f ? scale_y : 1.0f;
   }
+
+  // For the same host renderer: the scale the shaders revert is read from the system constants at
+  // draw time (texture_resolution_scale, pixel_position_scale_reciprocal) instead of being written into
+  // each translation, so one translation serves every scale (a host pipeline cache stays valid when the
+  // output's size changes), and each draw can give the scale of its own target. Replaces
+  // SetFractionalResolutionScale; at a scale of 1 the shaders compute what they compute without it.
+  // Call before translating.
+  void SetDynamicResolutionScale(bool enabled) { dynamic_resolution_scale_ = enabled; }
 
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
@@ -773,6 +789,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // The scale the shaders revert (SetFractionalResolutionScale); the whole scale otherwise.
   float shader_resolution_scale_x_;
   float shader_resolution_scale_y_;
+  // SetDynamicResolutionScale: the scale read from the system constants instead.
+  bool dynamic_resolution_scale_ = false;
 
   // Is currently writing the empty depth-only pixel shader, such as for depth
   // and stencil testing with fragment shader interlock.
@@ -894,6 +912,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantEdramRTKeepMask,
     kSystemConstantEdramRTClamp,
     kSystemConstantEdramBlendConstant,
+    // Declared only with SetDynamicResolutionScale: keep these two last.
+    kSystemConstantTextureResolutionScale,
+    kSystemConstantPixelPositionScaleReciprocal,
   };
   spv::Id uniform_system_constants_;
   spv::Id uniform_float_constants_;

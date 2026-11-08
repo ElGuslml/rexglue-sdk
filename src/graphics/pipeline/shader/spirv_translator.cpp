@@ -309,14 +309,28 @@ void SpirvShaderTranslator::StartTranslation() {
       {"edram_rt_keep_mask", offsetof(SystemConstants, edram_rt_keep_mask), type_uint4_array_2},
       {"edram_rt_clamp", offsetof(SystemConstants, edram_rt_clamp), type_float4_array_4},
       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant), type_float4_},
+      // Declared only with SetDynamicResolutionScale, so the other shaders stay as they were.
+      {"texture_resolution_scale", offsetof(SystemConstants, texture_resolution_scale),
+       type_float4_},
+      {"pixel_position_scale_reciprocal",
+       offsetof(SystemConstants, pixel_position_scale_reciprocal), type_float2_},
   };
+  static_assert(offsetof(SystemConstants, texture_resolution_scale) % (sizeof(float) * 4) == 0,
+                "std140: a vec4 member is aligned to 16 bytes");
+  static_assert(offsetof(SystemConstants, pixel_position_scale_reciprocal) % (sizeof(float) * 2) == 0,
+                "std140: a vec2 member is aligned to 8 bytes");
+  static_assert(kSystemConstantPixelPositionScaleReciprocal + 1 ==
+                    sizeof(system_constants) / sizeof(system_constants[0]),
+                "the dynamic resolution scale's members are the last two");
+  const size_t system_constant_count =
+      rex::countof(system_constants) - (dynamic_resolution_scale_ ? 0 : 2);
   id_vector_temp_.clear();
-  id_vector_temp_.reserve(rex::countof(system_constants));
-  for (size_t i = 0; i < rex::countof(system_constants); ++i) {
+  id_vector_temp_.reserve(system_constant_count);
+  for (size_t i = 0; i < system_constant_count; ++i) {
     id_vector_temp_.push_back(system_constants[i].type);
   }
   spv::Id type_system_constants = builder_->makeStructType(id_vector_temp_, "XeSystemConstants");
-  for (size_t i = 0; i < rex::countof(system_constants); ++i) {
+  for (size_t i = 0; i < system_constant_count; ++i) {
     const SystemConstant& system_constant = system_constants[i];
     builder_->addMemberName(type_system_constants, static_cast<unsigned int>(i),
                             system_constant.name);
@@ -3210,7 +3224,21 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
             builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
                                         id_vector_temp_),
             spv::NoPrecision));
-    if (shader_resolution_scale_x_ > 1.0f) {
+    // The reciprocal of the scale reverted in the pixel position, from the system constants with
+    // SetDynamicResolutionScale.
+    auto load_pixel_position_scale_reciprocal = [&](int component) {
+      id_vector_temp_.clear();
+      id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantPixelPositionScaleReciprocal));
+      id_vector_temp_.push_back(builder_->makeIntConstant(component));
+      return builder_->createLoad(
+          builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
+                                      id_vector_temp_),
+          spv::NoPrecision);
+    };
+    if (dynamic_resolution_scale_) {
+      param_gen_x = builder_->createNoContractionBinOp(spv::OpFMul, type_float_, param_gen_x,
+                                                       load_pixel_position_scale_reciprocal(0));
+    } else if (shader_resolution_scale_x_ > 1.0f) {
       param_gen_x = builder_->createNoContractionBinOp(
           spv::OpFMul, type_float_, param_gen_x,
           builder_->makeFloatConstant(1.0f / shader_resolution_scale_x_));
@@ -3246,7 +3274,10 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
             builder_->createAccessChain(spv::StorageClassInput, input_fragment_coordinates_,
                                         id_vector_temp_),
             spv::NoPrecision));
-    if (shader_resolution_scale_y_ > 1.0f) {
+    if (dynamic_resolution_scale_) {
+      param_gen_y = builder_->createNoContractionBinOp(spv::OpFMul, type_float_, param_gen_y,
+                                                       load_pixel_position_scale_reciprocal(1));
+    } else if (shader_resolution_scale_y_ > 1.0f) {
       param_gen_y = builder_->createNoContractionBinOp(
           spv::OpFMul, type_float_, param_gen_y,
           builder_->makeFloatConstant(1.0f / shader_resolution_scale_y_));
