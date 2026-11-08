@@ -30,6 +30,20 @@
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
 #include <rex/thread/atomic.h>
+#include <rex/cvar.h>
+
+#include <chrono>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
+REXCVAR_DEFINE_INT32(critical_section_spin_us, 0, "Kernel",
+                     "How long a thread entering a guest critical section another thread holds watches it, in "
+                     "microseconds, before it sleeps on the kernel (0 = only the guest's spin count, as on the "
+                     "console). A guest lock with no spin count put every contended entry to sleep and handed the "
+                     "lock to the sleeper, which took ~5 us to wake while the others queued behind it")
+    .range(0, 200);
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -394,6 +408,28 @@ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
       cs->owning_thread = cur_thread;
       cs->recursion_count = 1;
       return;
+    }
+  }
+
+  // The host's spin (critical_section_spin_us): the lock taken as soon as it is free, without counting this thread
+  // as a waiter. A waiter is handed the lock at its release and owns it while it wakes, so with no spin at all a
+  // lock held for a few microseconds by turns (a job queue's) put every thread to sleep and woke it again: Guitar
+  // Hero: Metallica's main thread and three job workers slept and woke each other ~78,000 times a second in a song.
+  if (const int32_t spin_us = REXCVAR_GET(critical_section_spin_us); spin_us > 0) {
+    volatile int32_t* lock_count = &cs->lock_count;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
+    for (uint32_t i = 1;; ++i) {
+      if (*lock_count == -1 && rex::thread::atomic_cas(-1, 0, lock_count)) {
+        cs->owning_thread = cur_thread;
+        cs->recursion_count = 1;
+        return;
+      }
+#if defined(_M_X64) || defined(__x86_64__)
+      _mm_pause();
+#endif
+      if ((i & 15) == 0 && std::chrono::steady_clock::now() >= deadline) {
+        break;
+      }
     }
   }
 
