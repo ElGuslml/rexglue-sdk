@@ -179,6 +179,10 @@ bool ReXApp::OnInitialize() {
     app_context().RequestDeferredQuit();
     return true;
   }
+  if (OnToolMode()) {
+    app_context().RequestDeferredQuit();
+    return true;
+  }
   if (!SetupPresentation())
     return false;
 

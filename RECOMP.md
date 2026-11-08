@@ -109,6 +109,7 @@ decisions (`native_x_renderer/docs/decisions.md`).
 | 32 | `SharedMemory::RequestRanges` keeps its merged ranges between calls (D84) |
 | 33 | The guest's swaps are counted, and a renderer is told when one executes (D86) |
 | 73 | The SPIR-V translator can read the resolution scale it reverts from the system constants (`SetDynamicResolutionScale`: `texture_resolution_scale`, `pixel_position_scale_reciprocal`), so one translation serves every scale and each draw gives its own (D128). The members are declared only in that mode: without it every translation is byte for byte what it was (checked on the stored shaders of ten games) |
+| 74 | `ReXApp::OnToolMode()`: an app's own tool mode, called after `SetupEnvironment` (paths, configuration and logging ready) and before any window, runtime or guest, beside `--achievements_cache_only` and `--install_content`; true quits. NativeXRenderer's pipeline preparation for a launcher ("Compiling shaders") and its pipeline list maker run there (D129) |
 
 ## For the games
 

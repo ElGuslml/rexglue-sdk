@@ -152,6 +152,11 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// Called after logging is initialized. Add log sinks here.
   virtual void OnPostInitLogging() {}
 
+  /// Called after SetupEnvironment (paths, configuration and logging ready), before any window, runtime or guest:
+  /// a tool mode of the app's own (a renderer's preparation for a launcher, for one). Return true when this run was
+  /// one and the work is done: the app then quits, as with --achievements_cache_only.
+  virtual bool OnToolMode() { return false; }
+
   /// Called after Runtime::LoadXexImage() succeeds. The XEX is loaded and
   /// mapped into guest memory but the module has not launched.
   /// Use this for data patches and recomp-specific achievement registration.
