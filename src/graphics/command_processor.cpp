@@ -61,6 +61,11 @@ REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
                     "scaled block during resolve readback downscale")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(sync_only_lean, true, "GPU",
+                    "With host rendering off (a renderer of its own draws, the packets run for synchronization only): "
+                    "no shader loaded at IM_LOAD unless a draw observer asks for it, and no presenter refresh or host "
+                    "submission at a swap (false = both as with host rendering)");
+
 REXCVAR_DEFINE_BOOL(readback_memexport, true, "GPU",
                     "Enable CPU readback of shader memexport writes for guest memory "
                     "coherency (can reduce correctness issues, but may add GPU/CPU sync cost)")
@@ -1025,7 +1030,12 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
-  IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+  // With host rendering off the presenter is not shown (the renderer that draws presents itself): its guest output
+  // refresh (the frontbuffer requested from the texture cache, a copy) and the host submission a swap ends were a
+  // tenth of this thread's time in Kameo (sync_only_lean). The swap's count, observer and pacing below stay.
+  if (host_rendering() || !REXCVAR_GET(sync_only_lean)) {
+    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+  }
   uint64_t swaps_executed = swaps_executed_.fetch_add(1, std::memory_order_acq_rel) + 1;
   if (auto observer = swap_observer_.load(std::memory_order_acquire)) {
     observer(swap_observer_user_, swaps_executed);
@@ -1527,6 +1537,7 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
   }
 
   if (system::GpuDrawObserver observer = draw_observer_.load(std::memory_order_acquire)) [[unlikely]] {
+    LoadPendingShaders();  // sync_only_lean: the shaders this draw uses, if IM_LOAD left them for now
     system::GpuDrawInfo info{};
     info.packet_address = observed_packet_address_;
     info.opcode = (packet >> 8) & 0x7F;
@@ -1687,6 +1698,21 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD(memory::RingBuffer* reader, ui
   uint32_t size_dwords = start_size & 0xFFFF;  // dwords
   assert_true(start == 0);
 
+  if (shader_type != xenos::ShaderType::kVertex && shader_type != xenos::ShaderType::kPixel) {
+    assert_unhandled_case(shader_type);
+    return false;
+  }
+  PendingShader& pending = pending_shaders_[shader_type == xenos::ShaderType::kVertex ? 0 : 1];
+  // With host rendering off nothing draws with the shader: loading it (hashing the microcode, the backend's shader
+  // map) was an eighth of this thread's time in Kameo. Only a draw observer reads the active shaders then: they are
+  // loaded when it does (LoadPendingShaders), from the microcode still bound at that draw (sync_only_lean).
+  if (!host_rendering() && REXCVAR_GET(sync_only_lean)) {
+    pending = {addr, size_dwords, true};
+    (shader_type == xenos::ShaderType::kVertex ? active_vertex_shader_ : active_pixel_shader_) = nullptr;
+    return true;
+  }
+  pending.pending = false;
+
   auto shader =
       LoadShader(shader_type, addr, memory_->TranslatePhysical<uint32_t*>(addr), size_dwords);
   switch (shader_type) {
@@ -1722,9 +1748,11 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD_IMMEDIATE(memory::RingBuffer* 
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;
+      pending_shaders_[0].pending = false;
       break;
     case xenos::ShaderType::kPixel:
       active_pixel_shader_ = shader;
+      pending_shaders_[1].pending = false;
       break;
     default:
       assert_unhandled_case(shader_type);
@@ -1732,6 +1760,18 @@ bool CommandProcessor::ExecutePacketType3_IM_LOAD_IMMEDIATE(memory::RingBuffer* 
   }
   reader->AdvanceRead(size_dwords * sizeof(uint32_t));
   return true;
+}
+
+void CommandProcessor::LoadPendingShaders() {
+  for (int i = 0; i < 2; ++i) {
+    PendingShader& pending = pending_shaders_[i];
+    if (!pending.pending) continue;
+    pending.pending = false;
+    const auto type = i ? xenos::ShaderType::kPixel : xenos::ShaderType::kVertex;
+    Shader* shader = LoadShader(type, pending.address, memory_->TranslatePhysical<uint32_t*>(pending.address),
+                                pending.size_dwords);
+    (i ? active_pixel_shader_ : active_vertex_shader_) = shader;
+  }
 }
 
 bool CommandProcessor::ExecutePacketType3_INVALIDATE_STATE(memory::RingBuffer* reader,

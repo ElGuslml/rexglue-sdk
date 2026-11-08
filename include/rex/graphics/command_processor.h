@@ -292,6 +292,15 @@ class CommandProcessor {
 
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;
+  // IM_LOAD with host rendering off (sync_only_lean): the shader's microcode address, loaded only when a draw observer
+  // asks for the active shaders (LoadPendingShaders). [0] vertex, [1] pixel.
+  struct PendingShader {
+    uint32_t address = 0;
+    uint32_t size_dwords = 0;
+    bool pending = false;
+  };
+  PendingShader pending_shaders_[2];
+  void LoadPendingShaders();
 
   // Draw observer (SetDrawObserver), and the physical address of the type-3 packet being executed,
   // kept only while an observer is set.
