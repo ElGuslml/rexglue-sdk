@@ -22,6 +22,24 @@ constexpr uint32_t kMaxGuestUsers = 4;
 /// device took the freed slot.
 enum class DeviceId : uint64_t { kInvalid = 0 };
 
+/// The kind of gamepad a device is, for a game's button prompts: SDL's gamepad type (SDL_GamepadType, in its order)
+/// for SDL's pads, which follows the controller behind Steam Input's virtual pads too; kUnknown for the other
+/// drivers' devices (XInput's, the keyboard's pad, the NOP stand-in).
+enum class GamepadType : uint8_t {
+  kUnknown,
+  kStandard,
+  kXbox360,
+  kXboxOne,
+  kPS3,
+  kPS4,
+  kPS5,
+  kSwitchPro,
+  kJoyConLeft,
+  kJoyConRight,
+  kJoyConPair,
+  kGameCube,
+};
+
 struct DeviceInfo {
   DeviceId id = DeviceId::kInvalid;
   uint32_t ordinal = 0;  // connection order, assigned by InputSystem
@@ -29,6 +47,7 @@ struct DeviceInfo {
   std::string guid;
   std::string serial;  // the controller's own, when its driver has one (SDL's HIDAPI pads)
   uint8_t subtype = 0x01;  // XINPUT_DEVSUBTYPE_*
+  GamepadType gamepad_type = GamepadType::kUnknown;
   bool synthetic = false;  // keyboard/mouse emulation or the NOP stand-in
   // Its right stick's X axis is a whammy bar already, -32768 at rest: calibrated (gamepad_whammy_calibration), or a
   // gamepad's found resting there (a guitar that reports itself as a gamepad). Not folded as a stick's

@@ -88,6 +88,11 @@ class InputSystem : public system::IInputSystem {
   /// instruments and singer) keeps its first answer, the controller's; a game's hook makes it ask again where that is
   /// safe. True once per change. Called on the guest's threads.
   bool TakeDeviceKindChange(uint32_t user_index);
+  /// The device that speaks for the user now: of the devices assigned to the user, the one most recently in the
+  /// player's hands (ActiveDeviceTracker), so a game's button prompts can follow it (its gamepad_type, or synthetic for
+  /// the keyboard's pad). Its id is DeviceId::kInvalid when the user has no device. A copy, as the guest's last read
+  /// left the list of devices. Any thread.
+  DeviceInfo GetActiveDevice(uint32_t user_index);
 
   std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
   /// Guest user whose device most recently produced a button press.
@@ -177,5 +182,8 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode);
 void SetPrimaryPressWindow(bool open);
 /// The runtime's InputSystem::TakeDeviceKindChange, for a game's hooks; false without an input system.
 bool TakeDeviceKindChange(uint32_t user_index);
+/// The runtime's InputSystem::GetActiveDevice, for a game's hooks; a DeviceInfo with an invalid id without an input
+/// system.
+DeviceInfo GetActiveDevice(uint32_t user_index);
 
 }  // namespace rex::input
