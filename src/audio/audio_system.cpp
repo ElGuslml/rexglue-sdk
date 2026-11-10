@@ -37,9 +37,9 @@ REXCVAR_DEFINE_INT32(
     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
 
 REXCVAR_DEFINE_INT32(audio_callback_min_interval_us, 0, "Audio",
-                     "Minimum time between two calls of a client's render callback, in microseconds "
-                     "(0 = as soon as a frame is free). The console calls it every 5333 us; the host "
-                     "device frees frames in bursts")
+                     "Minimum time from the start of a client's render callback to the start of its next "
+                     "call, in microseconds (0 = as soon as a frame is free). The console calls it every "
+                     "5333 us; the host device frees frames in bursts")
     .range(0, 5000);
 
 REXCVAR_DEFINE_BOOL(audio_thread_priority, false, "Audio",
@@ -195,10 +195,10 @@ void AudioSystem::WorkerThreadMain() {
         if (!catching_up) {
           PaceClientCallback(index);
         }
+        last_callback_[index] = std::chrono::steady_clock::now();
         uint64_t args[] = {client_callback_arg};
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
                                       rex::countof(args));
-        last_callback_[index] = std::chrono::steady_clock::now();
         if (diag_pump_count < 10) {
           REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
         }
@@ -233,6 +233,10 @@ void AudioSystem::WorkerThreadMain() {
 // position come back to the same block and mixes one block in a dozen, while the rest of the time the
 // stale ring is played again (a buzz instead of music). Spacing the calls keeps the average rate,
 // which the frames the device frees still decide, and gives the game's poll every block.
+// The interval runs from the previous call's start, so the callback's own work counts toward it: a
+// frame costs the longer of the two, not their sum. Counted from its return, a 3 ms interval left a
+// callback 2.3 ms of each 5.33 ms frame, which a slower CPU passes in a song: the sound fell behind
+// and audio_keep_time dropped a frame every few hundred ms (a crackle).
 void AudioSystem::PaceClientCallback(size_t index) {
   const int32_t interval_us = REXCVAR_GET(audio_callback_min_interval_us);
   if (interval_us <= 0) {

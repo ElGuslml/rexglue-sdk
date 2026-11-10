@@ -93,7 +93,7 @@ class AudioSystem : public system::IAudioSystem {
 
   int FindFreeClient();
 
-  // When each client's callback last returned (audio_callback_min_interval_us).
+  // When each client's callback was last called (audio_callback_min_interval_us).
   std::chrono::steady_clock::time_point last_callback_[kMaximumClientCount] = {};
 
   std::unique_ptr<rex::thread::Semaphore> client_semaphores_[kMaximumClientCount];
