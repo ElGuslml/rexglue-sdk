@@ -101,7 +101,8 @@ bool StfsContainerDevice::Initialize() {
 
 StfsContainerDevice::Error StfsContainerDevice::OpenFiles() {
   // Map the file containing the STFS Header and read it.
-  REXFS_INFO("Loading STFS header file: {}", rex::path_to_utf8(host_path_));
+  // Debug: a game mounts each content package read in place several times (ContentPackage).
+  REXFS_DEBUG("Loading STFS header file: {}", rex::path_to_utf8(host_path_));
 
   auto header_file = rex::filesystem::OpenFile(host_path_, "rb");
   if (!header_file) {
@@ -121,7 +122,7 @@ StfsContainerDevice::Error StfsContainerDevice::OpenFiles() {
   // we don't need to map any extra files.
   // NOTE: data_file_count is 0 for STFS and 1 for SVOD
   if (header_.metadata.data_file_count <= 1) {
-    REXFS_INFO("STFS container is a single file.");
+    REXFS_DEBUG("STFS container is a single file.");
     files_.emplace(std::make_pair(0, header_file));
     return Error::kSuccess;
   }
@@ -596,41 +597,13 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
 
       all_entries.push_back(entry.get());
 
-      // Fill in all block records.
-      // It's easier to do this now and just look them up later, at the cost
-      // of some memory. Nasty chain walk.
-      // TODO(benvanik): optimize if flags.contiguous is set.
+      // The block records are made when the file is first read (ResolveBlocks): walking every file's chain here read
+      // a level-0 hash table per 170 blocks of the whole package (about 5,000 reads for a pack of 3.4 GB) at each mount.
       if (entry->attributes() & system::X_FILE_ATTRIBUTE_NORMAL) {
-        uint32_t block_index = dir_entry.start_block_number();
-        size_t remaining_size = dir_entry.length;
-        while (remaining_size && block_index != kEndOfChain) {
-          size_t block_size = std::min(static_cast<size_t>(kBlockSize), remaining_size);
-          size_t offset = BlockToOffsetSTFS(block_index);
-          entry->block_list_.push_back({0, offset, block_size});
-          remaining_size -= block_size;
-          auto block_hash = GetBlockHash(block_index);
-          block_index = block_hash->level0_next_block();
-        }
-
-        if (remaining_size) {
-          // Loop above must have exited prematurely, bad hash tables?
-          REXFS_WARN(
-              "STFS file {} only found {} bytes for file, expected {} ({} "
-              "bytes missing)",
-              name, dir_entry.length.get() - remaining_size, dir_entry.length.get(),
-              remaining_size);
-          assert_always();
-        }
-
-        // Check that the number of blocks retrieved from hash entries matches
-        // the block count read from the file entry
-        if (entry->block_list_.size() != dir_entry.allocated_data_blocks()) {
-          REXFS_WARN(
-              "STFS failed to read correct block-chain for entry {}, read {} "
-              "blocks, expected {}",
-              entry->name_, entry->block_list_.size(), dir_entry.allocated_data_blocks());
-          assert_always();
-        }
+        entry->start_block_ = dir_entry.start_block_number();
+        entry->block_count_ = dir_entry.allocated_data_blocks();
+        entry->contiguous_ = dir_entry.flags.contiguous;
+        entry->blocks_resolved_ = false;
       }
 
       parent_entry->children_.emplace_back(std::move(entry));
@@ -650,6 +623,42 @@ StfsContainerDevice::Error StfsContainerDevice::ReadSTFS() {
   }
 
   return Error::kSuccess;
+}
+
+void StfsContainerDevice::ResolveBlocks(StfsContainerEntry* entry) {
+  if (entry->blocks_resolved_) {
+    return;
+  }
+  entry->blocks_resolved_ = true;
+  auto& list = entry->block_list_;
+  uint32_t block_index = entry->start_block_;
+  size_t remaining_size = entry->data_size_;
+  uint32_t blocks = 0;
+  while (remaining_size && block_index != kEndOfChain) {
+    size_t block_size = std::min(static_cast<size_t>(kBlockSize), remaining_size);
+    size_t offset = BlockToOffsetSTFS(block_index);
+    // Only the last block is short, so a block that starts where the previous record ends extends it.
+    if (!list.empty() && list.back().offset + list.back().length == offset) {
+      list.back().length += block_size;
+    } else {
+      list.push_back({0, offset, block_size});
+    }
+    remaining_size -= block_size;
+    ++blocks;
+    // A file marked contiguous takes the blocks after its first one (the hash tables between them are skipped by
+    // BlockToOffsetSTFS); another follows the chain in the level-0 hash tables.
+    block_index = entry->contiguous_ ? block_index + 1 : GetBlockHash(block_index)->level0_next_block();
+  }
+
+  if (remaining_size) {
+    // The chain ended early: bad hash tables?
+    REXFS_WARN("STFS file {} only found {} bytes for file, expected {} ({} bytes missing)", entry->name(),
+               entry->data_size_ - remaining_size, entry->data_size_, remaining_size);
+  }
+  if (blocks != entry->block_count_) {
+    REXFS_WARN("STFS failed to read correct block-chain for entry {}, read {} blocks, expected {}", entry->name(),
+               blocks, entry->block_count_);
+  }
 }
 
 size_t StfsContainerDevice::BlockToOffsetSTFS(uint64_t block_index) const {

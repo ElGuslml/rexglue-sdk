@@ -15,6 +15,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -71,6 +72,14 @@ class StfsContainerDevice : public Device {
   }
   uint32_t sectors_per_allocation_unit() const override { return 8; }
   uint32_t bytes_per_sector() const override { return 0x200; }
+
+  // The package's files share one host file handle (a seek, then a read): a read holds this lock, so the guest's
+  // threads can read files of one package at once (a song's pak while its audio streams).
+  std::mutex& io_mutex() { return io_mutex_; }
+  // An STFS file's block list, made on its first read (under io_mutex): by arithmetic for a file whose blocks follow
+  // one another, else along the hash tables' chain; blocks next to each other in the package are one record. Mounting
+  // reads only the file table, so a package of several GB mounts at once, and a file never read costs nothing.
+  void ResolveBlocks(StfsContainerEntry* entry);
 
   size_t data_size() const {
     if (header_.header.header_size) {
@@ -137,6 +146,7 @@ class StfsContainerDevice : public Device {
   uint32_t block_step[2];
 
   std::unordered_map<size_t, StfsHashTable> cached_hash_tables_;
+  std::mutex io_mutex_;
 };
 
 }  // namespace rex::filesystem

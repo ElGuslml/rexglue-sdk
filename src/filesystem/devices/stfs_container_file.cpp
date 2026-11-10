@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/filesystem/devices/stfs_container_device.h>
 #include <rex/filesystem/devices/stfs_container_entry.h>
 #include <rex/filesystem/devices/stfs_container_file.h>
 
@@ -37,6 +38,11 @@ X_STATUS StfsContainerFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offs
   size_t src_offset = 0;
   uint8_t* p = buffer.data();
   size_t remaining_length = std::min(buffer.size(), entry_->size() - byte_offset);
+
+  // The package's files share its host file: one read at a time (StfsContainerDevice::io_mutex).
+  auto* device = static_cast<StfsContainerDevice*>(entry_->device());
+  std::lock_guard lock(device->io_mutex());
+  device->ResolveBlocks(entry_);
 
   *out_bytes_read = 0;
   for (size_t i = 0; i < entry_->block_list().size(); i++) {

@@ -55,6 +55,13 @@ class StfsContainerEntry : public Entry {
   size_t data_size_;
   size_t block_;
   std::vector<BlockRecord> block_list_;
+  // An STFS file's first block, its block count and whether its blocks follow one another (the directory entry's
+  // contiguous flag): its block list is made when it is first read (StfsContainerDevice::ResolveBlocks). SVOD's lists
+  // are made with the entry.
+  uint32_t start_block_ = 0;
+  uint32_t block_count_ = 0;
+  bool contiguous_ = false;
+  bool blocks_resolved_ = true;
 };
 
 }  // namespace rex::filesystem
