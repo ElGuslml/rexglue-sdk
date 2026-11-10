@@ -11,7 +11,9 @@
 
 #pragma once
 
+#include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -116,6 +118,8 @@ struct XCONTENT_AGGREGATE_DATA : XCONTENT_DATA {
 };
 static_assert_size(XCONTENT_AGGREGATE_DATA, 0x148);
 
+// A package mounted for the guest under its root name ("CONT0:"): a folder of extracted files, or an STFS package
+// file read in place (the content packages list, ContentManager::ListContent).
 class ContentPackage {
  public:
   ContentPackage(KernelState* kernel_state, const std::string_view root_name,
@@ -130,6 +134,9 @@ class ContentPackage {
 
   uint32_t GetPackageLicense() const { return license_; }
 
+  // False when an STFS package file could not be read (not a package, damaged).
+  bool mounted() const { return mounted_; }
+
  private:
   KernelState* kernel_state_;
   std::string root_name_;
@@ -137,6 +144,7 @@ class ContentPackage {
   std::filesystem::path package_path_;
   XCONTENT_AGGREGATE_DATA content_data_;
   uint32_t license_ = 0;
+  bool mounted_ = false;
 };
 
 class ContentManager {
@@ -186,7 +194,21 @@ class ContentManager {
   // and writes a .header file for XAM enumeration.
   X_RESULT InstallContent(const std::filesystem::path& package_path);
 
+  // Downloadable content read in place: root_path_/0000000000000000/{title_id}/content_packages.txt names STFS package
+  // files (one absolute path a line, UTF-8; a line starting with '#' is a comment), wherever they are (a player's
+  // collection, on another drive). The running title's marketplace content lists them beside its extracted folders,
+  // as if installed for it, and a package opened is mounted from its file (StfsContainerDevice): nothing is copied,
+  // and the player's files are never written or deleted. A game's launcher writes the list (the packages the player
+  // turned on); without the file nothing changes.
+  static constexpr const char* kContentPackagesFileName = "content_packages.txt";
+
  private:
+  // The packages of the list (ListContent fills it): the file name the guest knows each by -> its file.
+  void ListContentPackages(uint32_t device_id, uint32_t title_id,
+                           std::vector<XCONTENT_AGGREGATE_DATA>& result);
+  // The file of a listed package, or empty.
+  std::filesystem::path ContentPackageFile(const std::string& file_name) const;
+
   std::filesystem::path ResolvePackageRoot(uint64_t xuid, XContentType content_type,
                                            uint32_t title_id = -1);
   std::filesystem::path ResolvePackagePath(uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data);
@@ -211,6 +233,9 @@ class ContentManager {
   rex::thread::global_critical_region global_critical_region_;
   std::unordered_map<string::string_key_case, ContentPackage*, string::string_key_case::Hash>
       open_packages_;
+
+  mutable std::mutex content_packages_mutex_;
+  std::unordered_map<std::string, std::filesystem::path> content_packages_;
 };
 
 }  // namespace xam

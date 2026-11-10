@@ -9,14 +9,19 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
+#include <fstream>
 #include <queue>
+#include <set>
 #include <string>
 
 #include <fmt/format.h>
 
 #include <rex/filesystem.h>
+#include <rex/logging.h>
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/devices/stfs_container_device.h>
 #include <rex/string.h>
@@ -46,14 +51,38 @@ ContentPackage::ContentPackage(KernelState* kernel_state, const std::string_view
   content_data_ = data;
 
   auto fs = kernel_state_->file_system();
-  auto device = std::make_unique<rex::filesystem::HostPathDevice>(device_path_, package_path, false,
-                                                                  /*allow_share_delete=*/true);
-  device->Initialize();
-  fs->RegisterDevice(std::move(device));
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(package_path, ec)) {
+    // A package file read in place (the content packages list): its files through the STFS device, its license from
+    // its header as InstallContent writes it.
+    auto start = std::chrono::steady_clock::now();
+    auto device = std::make_unique<rex::filesystem::StfsContainerDevice>(device_path_, package_path);
+    if (!device->Initialize()) {
+      REXSYS_ERROR("Content package {} could not be read as an STFS package", rex::path_to_utf8(package_path));
+      return;
+    }
+    for (size_t i = 0; i < 0x10; i++) {
+      if (device->header().header.licenses[i].license_flags) {
+        license_ |= device->header().header.licenses[i].license_bits;
+      }
+    }
+    REXSYS_DEBUG("Content package {} mounted as {} in place ({:.1f} ms)", rex::path_to_utf8(package_path), root_name_,
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    fs->RegisterDevice(std::move(device));
+  } else {
+    auto device = std::make_unique<rex::filesystem::HostPathDevice>(device_path_, package_path, false,
+                                                                    /*allow_share_delete=*/true);
+    device->Initialize();
+    fs->RegisterDevice(std::move(device));
+  }
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
+  mounted_ = true;
 }
 
 ContentPackage::~ContentPackage() {
+  if (!mounted_) {
+    return;
+  }
   auto fs = kernel_state_->file_system();
   fs->UnregisterSymbolicLink(root_name_ + ":");
   fs->UnregisterDevice(device_path_);
@@ -111,6 +140,11 @@ std::filesystem::path ContentManager::ResolvePackagePath(uint64_t xuid,
   // DLCs are stored in common directory
   if (data.content_type == XContentType::kMarketplaceContent) {
     used_xuid = 0;
+    // A package of the content packages list: its file, wherever it is.
+    auto file = ContentPackageFile(data.file_name());
+    if (!file.empty()) {
+      return file;
+    }
   }
 
   // Content path:
@@ -175,7 +209,100 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
     }
   }
 
+  // Downloadable content is common content (XUID 0), as its folders: the aggregate enumerator asks for the user's
+  // content, then for the common.
+  if (content_type == XContentType::kMarketplaceContent && title_id == kernel_state_->title_id() && xuid == 0) {
+    ListContentPackages(device_id, title_id, result);
+  }
+
   return result;
+}
+
+namespace {
+
+// FNV-1a of a path in lower case: a stable name for a package whose file name is too long for XCONTENT_DATA.
+uint32_t PathHash(const std::string& text) {
+  uint32_t hash = 0x811C9DC5u;
+  for (char c : text) {
+    hash = (hash ^ uint8_t(std::tolower(uint8_t(c)))) * 0x01000193u;
+  }
+  return hash;
+}
+
+std::string Lower(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(), [](char c) { return char(std::tolower(uint8_t(c))); });
+  return text;
+}
+
+}  // namespace
+
+void ContentManager::ListContentPackages(uint32_t device_id, uint32_t title_id,
+                                         std::vector<XCONTENT_AGGREGATE_DATA>& result) {
+  auto list_path =
+      root_path_ / fmt::format("{:016X}", 0) / fmt::format("{:08X}", title_id) / kContentPackagesFileName;
+  std::lock_guard lock(content_packages_mutex_);
+  content_packages_.clear();
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(list_path, ec)) {
+    return;
+  }
+  // A folder installed with the same name (an extracted copy of the package) comes first.
+  std::set<std::string> names;
+  for (const auto& data : result) {
+    names.insert(Lower(data.file_name()));
+  }
+  auto start = std::chrono::steady_clock::now();
+  size_t listed = 0, missing = 0, skipped = 0;
+  std::ifstream list(list_path, std::ios::binary);
+  std::string line;
+  while (std::getline(list, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    auto path = rex::to_path(line);
+    if (!std::filesystem::is_regular_file(path, ec)) {
+      ++missing;
+      continue;
+    }
+    auto header = rex::filesystem::StfsContainerDevice::ReadPackageHeader(path);
+    if (!header || header->metadata.content_type != XContentType::kMarketplaceContent) {
+      REXSYS_WARN("Content package {} skipped: not downloadable content", line);
+      ++skipped;
+      continue;
+    }
+    // The guest knows it by its file name (XCONTENT_DATA has 42 characters for it); a longer one is cut and made
+    // unique by the path's hash. The same name twice is the same package copied twice: the first stays.
+    std::string name = rex::path_to_utf8(path.filename());
+    if (name.size() > 42) {
+      name = fmt::format("{}~{:08X}", name.substr(0, 33), PathHash(line));
+    }
+    if (!names.insert(Lower(name)).second) {
+      REXSYS_WARN("Content package {} skipped: a package named {} is listed already", line, name);
+      ++skipped;
+      continue;
+    }
+    XCONTENT_AGGREGATE_DATA data{};
+    data.device_id = device_id;
+    data.content_type = XContentType::kMarketplaceContent;
+    auto display_name = header->metadata.display_name(rex::system::XLanguage::kEnglish);
+    data.set_display_name(display_name.empty() ? rex::path_to_utf16(path.filename()) : display_name);
+    data.set_file_name(name);
+    data.title_id = title_id;
+    data.xuid = 0;
+    result.push_back(data);
+    content_packages_[name] = path;
+    ++listed;
+  }
+  REXSYS_INFO("Content packages: {} listed from {} ({} missing, {} skipped) in {:.1f} ms", listed,
+              rex::path_to_utf8(list_path), missing, skipped,
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+}
+
+std::filesystem::path ContentManager::ContentPackageFile(const std::string& file_name) const {
+  std::lock_guard lock(content_packages_mutex_);
+  auto it = content_packages_.find(file_name);
+  return it == content_packages_.end() ? std::filesystem::path() : it->second;
 }
 
 std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
@@ -185,6 +312,9 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
     return nullptr;
   }
   auto package = std::make_unique<ContentPackage>(kernel_state_, root_name, data, package_path);
+  if (!package->mounted()) {
+    return nullptr;
+  }
   return package;
 }
 
@@ -304,7 +434,10 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name, uint64_t 
     return X_ERROR_FILE_NOT_FOUND;
   }
   auto package = ResolvePackage(root_name, xuid, data);
-  assert_not_null(package);
+  if (!package) {
+    // A package file that is not one (or a damaged one): the game passes it by, as a missing one.
+    return X_ERROR_FILE_NOT_FOUND;
+  }
   package->LoadPackageLicenseMask(ResolvePackageHeaderPath(
       data.file_name(), xuid, kernel_state_->title_id(), data.content_type));
   content_license = package->GetPackageLicense();
@@ -338,6 +471,18 @@ X_RESULT ContentManager::GetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
                                              std::vector<uint8_t>* buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(xuid, data);
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(package_path, ec)) {
+    // A package read in place: the thumbnail in its header (up to 0x4000 bytes in a version 1 header, which runs into
+    // the version 2 fields after it).
+    auto header = rex::filesystem::StfsContainerDevice::ReadPackageHeader(package_path);
+    uint32_t size = header ? std::min<uint32_t>(header->metadata.thumbnail_size, 0x4000) : 0;
+    if (!size) {
+      return X_ERROR_FILE_NOT_FOUND;
+    }
+    buffer->assign(header->metadata.thumbnail, header->metadata.thumbnail + size);
+    return X_ERROR_SUCCESS;
+  }
   auto thumb_path = package_path / kThumbnailFileName;
   if (std::filesystem::exists(thumb_path)) {
     auto file = rex::filesystem::OpenFile(thumb_path, "rb");
@@ -357,6 +502,10 @@ X_RESULT ContentManager::SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
                                              std::vector<uint8_t> buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(xuid, data);
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(package_path, ec)) {
+    return X_ERROR_ACCESS_DENIED;  // a package read in place: the player's file is never written
+  }
   std::filesystem::create_directories(package_path);
   if (std::filesystem::exists(package_path)) {
     auto thumb_path = package_path / kThumbnailFileName;
@@ -379,6 +528,9 @@ X_RESULT ContentManager::DeleteContent(uint64_t xuid, const XCONTENT_AGGREGATE_D
 
   auto package_path = ResolvePackagePath(xuid, data);
   std::error_code ec;
+  if (std::filesystem::is_regular_file(package_path, ec)) {
+    return X_ERROR_ACCESS_DENIED;  // a package read in place: the player's file is never deleted
+  }
   auto dir_removed = std::filesystem::remove_all(package_path, ec);
   if (ec ||
       std::filesystem::status(package_path, ec).type() != std::filesystem::file_type::not_found) {
@@ -426,6 +578,10 @@ X_RESULT ContentManager::UnmountAndDeleteContent(uint64_t xuid,
 
   // Delete phase: remove package directory and .header file
   auto package_path = ResolvePackagePath(xuid, data);
+  std::error_code file_ec;
+  if (std::filesystem::is_regular_file(package_path, file_ec)) {
+    return X_ERROR_ACCESS_DENIED;  // a package read in place: unmounted, but the player's file is never deleted
+  }
 
   uint64_t used_xuid = (data.xuid != uint64_t(-1) && data.xuid != 0) ? uint64_t(data.xuid) : xuid;
   auto header_path =
