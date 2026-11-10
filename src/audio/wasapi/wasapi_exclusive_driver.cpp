@@ -11,6 +11,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <future>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include <rex/audio/conversion.h>
 #include <rex/audio/downmix.h>
@@ -133,9 +137,7 @@ void JoinProAudio() {
   }
 }
 
-}  // namespace
-
-struct WasapiExclusiveDriver::Device {
+struct Device {
   ComPtr<IAudioClient> client;
   ComPtr<IAudioRenderClient> render;
   uint32_t buffer_frames = 0;  // the device's buffer
@@ -149,14 +151,76 @@ struct WasapiExclusiveDriver::Device {
   }
 };
 
-WasapiExclusiveDriver::WasapiExclusiveDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
-    : AudioDriver(memory), semaphore_(semaphore) {}
+}  // namespace
 
-WasapiExclusiveDriver::~WasapiExclusiveDriver() {
-  Shutdown();
+// The device, opened once for the process: an exclusive stream holds it, so a second one, even this process's, is
+// refused (AUDCLNT_E_DEVICE_IN_USE), and the shared output cannot open it either. Every client's driver attaches to
+// it; the render thread adds up their frames, as the console's render clients are mixed (clamped when written).
+class WasapiExclusiveDriver::Output {
+ public:
+  // The output the clients share, opened by the first; null when the device refuses.
+  static std::shared_ptr<Output> Acquire();
+  // A client's reference let go; the last one closes the device before a client registered next can open it again.
+  static void Release(std::shared_ptr<Output>& output);
+
+  ~Output();
+  void Attach(WasapiExclusiveDriver* client);
+  // When it returns the render thread no longer reads the client.
+  void Detach(WasapiExclusiveDriver* client);
+  // The render thread's gaps, said once in a while from a client's SubmitFrame (a log line writes its file in the
+  // caller's thread: never the render thread's).
+  void LogUnderruns();
+
+ private:
+  bool Open();
+  void RenderThread(std::promise<bool> opened);
+  // Adds `frames` to the device's buffer from the clients' frames.
+  bool Render(Device& device, uint32_t frames);
+
+  static inline std::mutex shared_mutex_;
+  static inline std::weak_ptr<Output> shared_;
+
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  std::string device_name_;
+
+  std::mutex clients_mutex_;
+  std::vector<WasapiExclusiveDriver*> clients_;
+  std::vector<float> mix_;  // the render thread's, interleaved stereo
+
+  // Times the device's buffer was found empty (a gap played); the count last logged, and when.
+  std::atomic<uint32_t> underruns_{0};
+  std::mutex log_mutex_;
+  uint32_t underruns_logged_ = 0;
+  std::chrono::steady_clock::time_point underruns_logged_at_ = {};
+};
+
+std::shared_ptr<WasapiExclusiveDriver::Output> WasapiExclusiveDriver::Output::Acquire() {
+  std::scoped_lock lock(shared_mutex_);
+  if (auto output = shared_.lock()) {
+    return output;
+  }
+  auto output = std::make_shared<Output>();
+  if (!output->Open()) {
+    return nullptr;
+  }
+  shared_ = output;
+  return output;
 }
 
-bool WasapiExclusiveDriver::Initialize() {
+void WasapiExclusiveDriver::Output::Release(std::shared_ptr<Output>& output) {
+  std::scoped_lock lock(shared_mutex_);
+  output.reset();
+}
+
+WasapiExclusiveDriver::Output::~Output() {
+  stop_ = true;
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+}
+
+bool WasapiExclusiveDriver::Output::Open() {
   std::promise<bool> opened;
   std::future<bool> result = opened.get_future();
   thread_ = std::thread([this, opened = std::move(opened)]() mutable { RenderThread(std::move(opened)); });
@@ -167,10 +231,60 @@ bool WasapiExclusiveDriver::Initialize() {
   return false;
 }
 
+void WasapiExclusiveDriver::Output::Attach(WasapiExclusiveDriver* client) {
+  size_t count = 0;
+  {
+    std::scoped_lock lock(clients_mutex_);
+    clients_.push_back(client);
+    count = clients_.size();
+  }
+  if (count > 1) {
+    REXAPU_INFO("audio_wasapi_exclusive: another audio client of the game mixed into '{}' ({} clients)",
+                device_name_, count);
+  }
+}
+
+void WasapiExclusiveDriver::Output::Detach(WasapiExclusiveDriver* client) {
+  std::scoped_lock lock(clients_mutex_);
+  clients_.erase(std::remove(clients_.begin(), clients_.end(), client), clients_.end());
+}
+
+void WasapiExclusiveDriver::Output::LogUnderruns() {
+  const uint32_t underruns = underruns_.load(std::memory_order_relaxed);
+  std::unique_lock lock(log_mutex_, std::try_to_lock);
+  if (!lock || underruns == underruns_logged_) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - underruns_logged_at_ >= std::chrono::seconds(10)) {
+    REXAPU_WARN("audio_wasapi_exclusive: the device's buffer ran empty ({} times so far): a larger "
+                "audio_wasapi_exclusive_buffer_ms may be needed",
+                underruns);
+    underruns_logged_ = underruns;
+    underruns_logged_at_ = now;
+  }
+}
+
+WasapiExclusiveDriver::WasapiExclusiveDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
+    : AudioDriver(memory), semaphore_(semaphore) {}
+
+WasapiExclusiveDriver::~WasapiExclusiveDriver() {
+  Shutdown();
+}
+
+bool WasapiExclusiveDriver::Initialize() {
+  output_ = Output::Acquire();
+  if (!output_) {
+    return false;
+  }
+  output_->Attach(this);
+  return true;
+}
+
 void WasapiExclusiveDriver::Shutdown() {
-  stop_ = true;
-  if (thread_.joinable()) {
-    thread_.join();
+  if (output_) {
+    output_->Detach(this);
+    Output::Release(output_);
   }
   std::scoped_lock lock(frames_mutex_);
   while (!frames_unused_.empty()) {
@@ -183,7 +297,7 @@ void WasapiExclusiveDriver::Shutdown() {
   }
 }
 
-void WasapiExclusiveDriver::RenderThread(std::promise<bool> opened) {
+void WasapiExclusiveDriver::Output::RenderThread(std::promise<bool> opened) {
   const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
   JoinProAudio();
   Device device;
@@ -244,6 +358,7 @@ void WasapiExclusiveDriver::RenderThread(std::promise<bool> opened) {
     hr = device.client->GetBufferSize(&buffer_frames);
     if (FAILED(hr)) return;
     device.buffer_frames = buffer_frames;
+    mix_.reserve(size_t(buffer_frames) * 2);
     device.target_frames = std::min<uint32_t>(
         buffer_frames, uint32_t(REXCVAR_GET(audio_wasapi_exclusive_buffer_ms)) * kRate / 1000);
     hr = device.client->GetService(IID_PPV_ARGS(&device.render));
@@ -275,11 +390,14 @@ void WasapiExclusiveDriver::RenderThread(std::promise<bool> opened) {
   auto next_paced = std::chrono::steady_clock::now();
   while (!stop_) {
     if (lost) {
-      // The device is gone: the client's frames are taken at the console's pace, so the game goes on, silently.
+      // The device is gone: the clients' frames are taken at the console's pace, so the game goes on, silently.
       next_paced += std::chrono::microseconds(5333);
       std::this_thread::sleep_until(next_paced);
-      if (NextFrame()) {
-        staging_read_ = kChannelSamples;
+      std::scoped_lock lock(clients_mutex_);
+      for (WasapiExclusiveDriver* client : clients_) {
+        if (client->NextFrame()) {
+          client->staging_read_ = kChannelSamples;
+        }
       }
       continue;
     }
@@ -333,28 +451,36 @@ bool WasapiExclusiveDriver::NextFrame() {
   return true;
 }
 
-bool WasapiExclusiveDriver::Render(Device& device, uint32_t frames) {
+bool WasapiExclusiveDriver::Output::Render(Device& device, uint32_t frames) {
   BYTE* data = nullptr;
   if (FAILED(device.render->GetBuffer(frames, &data))) {
     return false;
   }
-  uint8_t* out = data;
-  uint32_t silence = 0;
-  for (uint32_t i = 0; i < frames; ++i) {
-    if (staging_read_ == kChannelSamples && !NextFrame()) {
-      // Nothing queued: the rest of the period silent.
-      silence = frames - i;
-      std::memset(out, 0, size_t(silence) * device.sample.container / 8 * 2);
-      break;
+  mix_.assign(size_t(frames) * 2, 0.0f);
+  {
+    std::scoped_lock lock(clients_mutex_);
+    for (WasapiExclusiveDriver* client : clients_) {
+      client->Mix(mix_.data(), frames);
     }
-    WriteSample(out, staging_[staging_read_ * 2], device.sample);
-    WriteSample(out, staging_[staging_read_ * 2 + 1], device.sample);
-    ++staging_read_;
   }
-  if (silence) {
-    NoteSilence(silence);
+  uint8_t* out = data;
+  for (const float value : mix_) {
+    WriteSample(out, value, device.sample);
   }
   return SUCCEEDED(device.render->ReleaseBuffer(frames, 0));
+}
+
+void WasapiExclusiveDriver::Mix(float* out, uint32_t frames) {
+  for (uint32_t i = 0; i < frames; ++i) {
+    if (staging_read_ == kChannelSamples && !NextFrame()) {
+      // Nothing queued: the rest of the period silent for this client.
+      NoteSilence(frames - i);
+      return;
+    }
+    out[i * 2] += staging_[staging_read_ * 2];
+    out[i * 2 + 1] += staging_[staging_read_ * 2 + 1];
+    ++staging_read_;
+  }
 }
 
 // audio_keep_time: silence while the client submits is owed, one client frame per 256 samples.
@@ -383,16 +509,8 @@ uint32_t WasapiExclusiveDriver::QueuedFrames(uint32_t asked) const {
 }
 
 void WasapiExclusiveDriver::SubmitFrame(uint32_t frame_ptr) {
-  // The render thread's gaps, said once in a while from here: a log line writes its file in the caller's thread.
-  if (const uint32_t underruns = underruns_.load(std::memory_order_relaxed); underruns != underruns_logged_) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now - underruns_logged_at_ >= std::chrono::seconds(10)) {
-      REXAPU_WARN("audio_wasapi_exclusive: the device's buffer ran empty ({} times so far): a larger "
-                  "audio_wasapi_exclusive_buffer_ms may be needed",
-                  underruns);
-      underruns_logged_ = underruns;
-      underruns_logged_at_ = now;
-    }
+  if (output_) {
+    output_->LogUnderruns();
   }
   float* frame = nullptr;
   {

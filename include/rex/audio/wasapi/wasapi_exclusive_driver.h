@@ -10,12 +10,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <future>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <stack>
-#include <string>
-#include <thread>
 
 #include <rex/audio/audio_driver.h>
 #include <rex/thread.h>
@@ -25,25 +23,30 @@ namespace rex::audio::wasapi {
 // audio_wasapi_exclusive: the default output device opened in exclusive mode, its buffer kept a few milliseconds
 // ahead (audio_wasapi_exclusive_buffer_ms) from the client's frames (the console's 6 channels at 48 kHz, folded to stereo as the SDL driver does). Windows' audio engine
 // and the device's shared path are skipped: on a USB interface that path alone took 43-51 ms. Other programs cannot
-// play on the device meanwhile.
+// play on the device meanwhile. The device is opened once (Windows lets one stream hold it): a game with more than one
+// audio client (Guitar Hero 5 and Band Hero register the voice chat engine's beside the game's) has the frames of
+// each client's driver mixed into it.
 class WasapiExclusiveDriver : public AudioDriver {
  public:
   WasapiExclusiveDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore);
   ~WasapiExclusiveDriver() override;
 
-  // Opens the device and starts the render thread; false when the device refuses (another program holds it, exclusive
-  // mode not allowed, none of the formats): the caller uses the shared output instead.
+  // Joins the output another client opened, or opens the device and starts the render thread; false when the device
+  // refuses (another program holds it, exclusive mode not allowed, none of the formats): the caller uses the shared
+  // output instead.
   bool Initialize();
   void SubmitFrame(uint32_t frame_ptr) override;
   bool CatchingUp() const override { return owed_frames_.load(std::memory_order_relaxed) != 0; }
   uint32_t QueuedFrames(uint32_t asked) const override;
   void Shutdown();
 
+  // The device and its render thread, shared by the clients' drivers (wasapi_exclusive_driver.cpp).
+  class Output;
+
  private:
-  struct Device;
-  void RenderThread(std::promise<bool> opened);
-  // Adds `frames` to the device's buffer from the client's frames (silence when none is queued).
-  bool Render(Device& device, uint32_t frames);
+  // Called by the output's render thread. Adds `frames` of the client's sound to `out` (interleaved stereo); the
+  // rest of them silent when none is queued.
+  void Mix(float* out, uint32_t frames);
   // Takes the next client frame into the stereo staging buffer; false when none is queued.
   bool NextFrame();
   void NoteSilence(uint32_t samples);
@@ -57,7 +60,8 @@ class WasapiExclusiveDriver : public AudioDriver {
   std::stack<float*> frames_unused_;
   std::mutex frames_mutex_;
 
-  // The frame being played, folded to interleaved stereo, and how much of it has gone to the device.
+  // The frame being played, folded to interleaved stereo, and how much of it has gone to the device (the render
+  // thread's).
   float staging_[kChannelSamples * 2] = {};
   uint32_t staging_read_ = kChannelSamples;
 
@@ -67,14 +71,7 @@ class WasapiExclusiveDriver : public AudioDriver {
   uint32_t dropped_frames_ = 0;
   std::chrono::steady_clock::time_point last_submit_ = {};
 
-  // Times the device's buffer was found empty (a gap played); the count last logged, and when.
-  std::atomic<uint32_t> underruns_{0};
-  uint32_t underruns_logged_ = 0;
-  std::chrono::steady_clock::time_point underruns_logged_at_ = {};
-
-  std::thread thread_;
-  std::atomic<bool> stop_{false};
-  std::string device_name_;
+  std::shared_ptr<Output> output_;
 };
 
 }  // namespace rex::audio::wasapi
