@@ -414,6 +414,15 @@ bool InputSystem::TakeDeviceKindChange(uint32_t user_index) {
   return true;
 }
 
+DeviceInfo InputSystem::GetActiveDevice(uint32_t user_index) {
+  std::lock_guard lock(mutex_);
+  if (user_index >= kMaxGuestUsers) {
+    return {};
+  }
+  const DeviceInfo* info = DeviceInfoFor(ChooseDeviceForUser(user_index));
+  return info ? *info : DeviceInfo{};
+}
+
 bool InputSystem::PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad) {
   const bool whammy_rest = REXCVAR_GET(gamepad_whammy_rest);
   if (device.subtype != XINPUT_DEVSUBTYPE_GAMEPAD) {
@@ -900,6 +909,15 @@ bool TakeDeviceKindChange(uint32_t user_index) {
   }
   auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system());
   return input && input->TakeDeviceKindChange(user_index);
+}
+
+DeviceInfo GetActiveDevice(uint32_t user_index) {
+  auto* kernel_state = REX_KERNEL_STATE();
+  if (!kernel_state || !kernel_state->emulator()) {
+    return {};
+  }
+  auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system());
+  return input ? input->GetActiveDevice(user_index) : DeviceInfo{};
 }
 
 }  // namespace rex::input

@@ -644,6 +644,13 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
     const char* serial = SDL_GetGamepadSerial(controller.sdl);
     info.serial = serial ? serial : "";
     info.subtype = GamepadSubType(controller.sdl);
+    static_assert(static_cast<int>(GamepadType::kGameCube) == SDL_GAMEPAD_TYPE_GAMECUBE &&
+                      static_cast<int>(GamepadType::kPS5) == SDL_GAMEPAD_TYPE_PS5,
+                  "GamepadType follows SDL_GamepadType's order");
+    const SDL_GamepadType type = SDL_GetGamepadType(controller.sdl);
+    info.gamepad_type = type > SDL_GAMEPAD_TYPE_UNKNOWN && type < SDL_GAMEPAD_TYPE_COUNT
+                            ? static_cast<GamepadType>(type)
+                            : GamepadType::kUnknown;
     info.synthetic = false;
     info.whammy_bar = controller.whammy.axis >= 0 || controller.right_x_rest == RightXRest::kBar;
     out.push_back(info);
