@@ -75,6 +75,9 @@ class ObjectTable {
     return results;
   }
 
+  // The object whose guest object (XObject::guest_object) is at this guest address, or null.
+  object_ref<XObject> LookupObjectByGuestObject(uint32_t guest_object);
+
   std::vector<object_ref<XObject>> GetAllObjects();
   void PurgeAllObjects();  // Purges the object table of all guest objects
 

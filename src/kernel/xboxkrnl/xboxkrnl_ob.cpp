@@ -161,8 +161,24 @@ u32 ObDereferenceObject_entry(u32 native_ptr) {
     return 0;
   }
 
-  auto object = XObject::GetNativeObject<XObject>(
-      REX_KERNEL_STATE(), REX_KERNEL_MEMORY()->TranslateVirtual(native_ptr));
+  // The object the reference was taken on: ObReferenceObjectByHandle, ObLookupThreadByThreadId and
+  // XamGetPrivateEnumStructureFromHandle give out its guest object, so it is found by that address, and nothing
+  // is created here. GetNativeObject reads a handle stashed in a dispatch header, which not every guest object
+  // has: an enumerator's X_KENUMERATOR keeps its close message and user index there. It made an event on the
+  // enumerator and released it, and from then on released whatever object had taken that event's handle: the
+  // thread running the next call, or a file the game had just opened (GH Warriors of Rock with many DLC packages,
+  // one asynchronous XEnumerate per package: a read of the disc failed with an invalid handle, "Disc Read Error").
+  object_ref<XObject> object;
+  auto header = REX_KERNEL_MEMORY()->TranslateVirtual<X_DISPATCH_HEADER*>(native_ptr);
+  if (header->wait_list_flink == kXObjSignature) {
+    object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(header->wait_list_blink);
+    if (object && object->guest_object() != native_ptr) {
+      object.reset();
+    }
+  }
+  if (!object) {
+    object = REX_KERNEL_OBJECTS()->LookupObjectByGuestObject(native_ptr);
+  }
   if (object) {
     object->ReleaseHandle();
   }

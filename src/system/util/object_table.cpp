@@ -301,6 +301,21 @@ XObject* ObjectTable::LookupObject(X_HANDLE handle, bool already_locked) {
   return object;
 }
 
+object_ref<XObject> ObjectTable::LookupObjectByGuestObject(uint32_t guest_object) {
+  if (!guest_object) {
+    return nullptr;
+  }
+  auto global_lock = global_critical_region_.Acquire();
+  for (uint32_t slot = 0; slot < table_capacity_; ++slot) {
+    auto& entry = table_[slot];
+    if (entry.object && entry.object->guest_object() == guest_object) {
+      entry.object->Retain();
+      return object_ref<XObject>(entry.object);
+    }
+  }
+  return nullptr;
+}
+
 void ObjectTable::GetObjectsByType(XObject::Type type, std::vector<object_ref<XObject>>* results) {
   auto global_lock = global_critical_region_.Acquire();
   for (uint32_t slot = 0; slot < table_capacity_; ++slot) {
