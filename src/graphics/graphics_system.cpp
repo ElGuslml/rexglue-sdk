@@ -665,6 +665,18 @@ bool GraphicsSystem::SetSignalGate(system::GpuSignalGate gate, void* user) {
   return true;
 }
 
+bool GraphicsSystem::SetSignalGateTagged(system::GpuSubmissionTagger tagger, system::GpuSignalGateTagged gate,
+                                         void* user) {
+  if (!command_processor_) {
+    return false;
+  }
+  command_processor_->SetSignalGateTagged(tagger, gate, user);
+  if (gate) {
+    REXGPU_INFO("Signal gate set, told each signal's submission");
+  }
+  return true;
+}
+
 bool GraphicsSystem::GetSwapCounts(uint64_t& issued, uint64_t& executed) {
   issued = swaps_issued_.load(std::memory_order_acquire);
   executed = command_processor_ ? command_processor_->swaps_executed() : 0;

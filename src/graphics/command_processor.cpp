@@ -264,7 +264,7 @@ void CommandProcessor::WorkerThreadMain() {
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
     //     that many indices.
     if (read_ptr_writeback_ptr_) {
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kReadPointer);
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
                                        read_ptr_index_);
     }
@@ -333,6 +333,12 @@ bool CommandProcessor::SetupContext() {
 void CommandProcessor::ShutdownContext() {}
 
 void CommandProcessor::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
+  {
+    // A new ring buffer: submissions of the old one would name positions of another ring (only taken by the command
+    // processor's thread, which has not started a run of the new one yet).
+    std::lock_guard lock(submissions_mutex_);
+    submissions_.clear();
+  }
   read_ptr_index_ = 0;
   primary_buffer_ptr_ = ptr;
   primary_buffer_size_ = uint32_t(1) << (size_log2 + 3);
@@ -349,8 +355,43 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
 }
 
 void CommandProcessor::UpdateWritePointer(uint32_t value) {
+  if (auto tagger = submission_tagger_.load(std::memory_order_acquire)) {
+    // The submission's tag, on the thread that submits, before the command processor can see its packets.
+    const uint64_t tag = tagger(signal_gate_user_);
+    std::lock_guard lock(submissions_mutex_);
+    // Bounded: a command processor that took none for this long (not running) starts over without tags.
+    if (submissions_.size() >= 65536) submissions_.clear();
+    submissions_.push_back({value, tag});
+  }
   write_ptr_index_ = value;
   write_ptr_index_event_->Set();
+}
+
+void CommandProcessor::TrackSubmissions(uint32_t start, uint32_t end, uint32_t position) {
+  // Positions as distances from the run's start along the ring: the run covers (start, end]; the submissions it took
+  // are in order, each ending where the next begins.
+  const uint32_t size = primary_buffer_size_ / sizeof(uint32_t);
+  if (!size) {
+    current_tag_ = system::kGpuSignalTagUnknown;
+    return;
+  }
+  auto distance = [&](uint32_t index) { return (index % size + size - start % size) % size; };
+  const uint32_t at = distance(position), to = distance(end);
+  while (!pending_submissions_.empty()) {
+    const uint32_t ends = distance(pending_submissions_.front().write_index);
+    // Still to come (its packets reach past this one), or a later run's.
+    if (ends > at || ends > to) break;
+    passed_tag_ = pending_submissions_.front().tag;
+    passed_index_ = pending_submissions_.front().write_index;
+    pending_submissions_.pop_front();
+  }
+  // The packet's submission: the first not passed, if it ends within this run. Otherwise none of the submissions
+  // taken covers it (they came before a tagger was set): unknown, the gate waits for everything.
+  current_tag_ = system::kGpuSignalTagUnknown;
+  if (!pending_submissions_.empty()) {
+    const uint32_t ends = distance(pending_submissions_.front().write_index);
+    if (ends > at && ends <= to) current_tag_ = pending_submissions_.front().tag;
+  }
 }
 
 uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
@@ -391,7 +432,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
     if ((1 << scratch_reg) & regs.values[XE_GPU_REG_SCRATCH_UMSK]) {
       // Enabled - write to address.
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kScratch);
       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
@@ -653,7 +694,19 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
   reader.set_read_offset(read_index * sizeof(uint32_t));
   reader.set_write_offset(write_index * sizeof(uint32_t));
+  // The submissions this run covers (SetSignalGateTagged): taken now, all added before the write pointer was read.
+  const bool tagged = signal_gate_tagged_.load(std::memory_order_acquire) != nullptr;
+  if (tagged) {
+    std::lock_guard lock(submissions_mutex_);
+    pending_submissions_.insert(pending_submissions_.end(), submissions_.begin(), submissions_.end());
+    submissions_.clear();
+  } else {
+    pending_submissions_.clear();
+  }
+  passed_tag_ = system::kGpuSignalTagUnknown;
+  passed_index_ = UINT32_MAX;
   do {
+    if (tagged) TrackSubmissions(read_index, write_index, uint32_t(reader.read_offset() / sizeof(uint32_t)));
     if (!ExecutePacket(&reader)) {
       // This probably should be fatal - but we're going to continue anyways.
       REXGPU_ERROR("**** PRIMARY RINGBUFFER: Failed to execute packet.");
@@ -661,6 +714,14 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
       break;
     }
   } while (reader.read_count());
+  // Every submission up to the write pointer passed: the read pointer's write-back gets the tag of the one that ends
+  // there; if none does (packets of a submission without a tag), unknown. A tag only grows from one submission to the
+  // next, so a later submission's is always safe and an earlier one's never.
+  if (tagged) {
+    TrackSubmissions(read_index, write_index, write_index);
+    if (passed_index_ != write_index) passed_tag_ = system::kGpuSignalTagUnknown;
+  }
+  current_tag_ = system::kGpuSignalTagUnknown;
 
   OnPrimaryBufferEnd();
 
@@ -825,11 +886,11 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       result = ExecutePacketType3_NOP(reader, packet, count);
       break;
     case PM4_INTERRUPT:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kInterrupt);
       result = ExecutePacketType3_INTERRUPT(reader, packet, count);
       break;
     case PM4_XE_SWAP:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kSwap);
       result = ExecutePacketType3_XE_SWAP(reader, packet, count);
       break;
     case PM4_INDIRECT_BUFFER:
@@ -843,30 +904,30 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       result = ExecutePacketType3_REG_RMW(reader, packet, count);
       break;
     case PM4_REG_TO_MEM:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kMemoryWrite);
       result = ExecutePacketType3_REG_TO_MEM(reader, packet, count);
       break;
     case PM4_MEM_WRITE:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kMemoryWrite);
       result = ExecutePacketType3_MEM_WRITE(reader, packet, count);
       break;
     case PM4_COND_WRITE:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kMemoryWrite);
       result = ExecutePacketType3_COND_WRITE(reader, packet, count);
       break;
     case PM4_EVENT_WRITE:
       result = ExecutePacketType3_EVENT_WRITE(reader, packet, count);
       break;
     case PM4_EVENT_WRITE_SHD:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kMemoryWrite);
       result = ExecutePacketType3_EVENT_WRITE_SHD(reader, packet, count);
       break;
     case PM4_EVENT_WRITE_EXT:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kMemoryWrite);
       result = ExecutePacketType3_EVENT_WRITE_EXT(reader, packet, count);
       break;
     case PM4_EVENT_WRITE_ZPD:
-      PassSignalGate();
+      PassSignalGate(system::GpuSignalKind::kOcclusionQuery);
       result = ExecutePacketType3_EVENT_WRITE_ZPD(reader, packet, count);
       break;
     case PM4_DRAW_INDX:

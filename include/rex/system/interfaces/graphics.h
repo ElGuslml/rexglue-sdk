@@ -61,6 +61,24 @@ using OcclusionQueryResolver = bool (*)(void* user, uint32_t sample_count_addres
 // Passed by the command processor before it signals the guest (see IGraphicsSystem::SetSignalGate).
 using GpuSignalGate = void (*)(void* user);
 
+// The kinds of signal the command processor gates (see IGraphicsSystem::SetSignalGateTagged).
+enum class GpuSignalKind : uint8_t {
+  kMemoryWrite,     // EVENT_WRITE_SHD (fences), EVENT_WRITE_EXT, MEM_WRITE, COND_WRITE, REG_TO_MEM
+  kScratch,         // a scratch register's write-back
+  kReadPointer,     // the ring buffer's read pointer write-back
+  kInterrupt,       // INTERRUPT
+  kSwap,            // XE_SWAP
+  kOcclusionQuery,  // EVENT_WRITE_ZPD
+};
+// The tag a gate is given when the command processor cannot tell which submission a signal came in.
+constexpr uint64_t kGpuSignalTagUnknown = UINT64_MAX;
+// Called when the guest submits to the ring buffer (a write of the write pointer's register), on the thread that
+// submits: the tag the gate is given for the signals among the packets of that submission.
+using GpuSubmissionTagger = uint64_t (*)(void* user);
+// The gate (as GpuSignalGate) with the tag of the submission the signal came in, or kGpuSignalTagUnknown, and the
+// signal's kind.
+using GpuSignalGateTagged = void (*)(void* user, uint64_t tag, GpuSignalKind kind);
+
 // Called by the command processor after it executed one of the guest's swaps, with the number executed so far
 // (see IGraphicsSystem::SetSwapObserver).
 using GpuSwapObserver = void (*)(void* user, uint64_t swaps_executed);
@@ -155,6 +173,21 @@ class IGraphicsSystem {
   // along than that renderer, and does not reuse memory it still reads. nullptr turns it off. Returns false
   // if the system has no command processor.
   virtual bool SetSignalGate(GpuSignalGate gate, void* user) {
+    (void)gate;
+    (void)user;
+    return false;
+  }
+
+  // SetSignalGate, told which submission each signal came in. The tagger is called whenever the guest submits to the
+  // ring buffer (writes its write pointer register: the submission's packets are all in the ring buffer then), on the
+  // thread that submits; the gate is then given its value for every signal among that submission's packets, and the
+  // read pointer's write-back the value of the last submission it covers. A renderer that numbers what the guest
+  // submitted (its commands) can wait at each signal for what came before it only, not for everything submitted
+  // since: the guest's waits for the GPU then overlap with the renderer's work instead of following it. Set, it
+  // replaces SetSignalGate's gate; a null gate turns it off. Returns false if the system has no command processor
+  // (SetSignalGateTagged(nullptr, nullptr, nullptr) answers whether it can, and sets nothing else).
+  virtual bool SetSignalGateTagged(GpuSubmissionTagger tagger, GpuSignalGateTagged gate, void* user) {
+    (void)tagger;
     (void)gate;
     (void)user;
     return false;

@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -100,6 +101,12 @@ class CommandProcessor {
   void SetSignalGate(system::GpuSignalGate gate, void* user) {
     signal_gate_user_ = user;
     signal_gate_.store(gate, std::memory_order_release);
+  }
+  // See system::IGraphicsSystem::SetSignalGateTagged.
+  void SetSignalGateTagged(system::GpuSubmissionTagger tagger, system::GpuSignalGateTagged gate, void* user) {
+    signal_gate_user_ = user;
+    submission_tagger_.store(gate ? tagger : nullptr, std::memory_order_release);
+    signal_gate_tagged_.store(gate, std::memory_order_release);
   }
   // See system::IGraphicsSystem::SetSwapObserver and GetSwapCounts.
   void SetSwapObserver(system::GpuSwapObserver observer, void* user) {
@@ -307,14 +314,37 @@ class CommandProcessor {
   std::atomic<system::GpuDrawObserver> draw_observer_{nullptr};
   // Off: packets run for synchronization only (SetHostRendering).
   std::atomic<bool> host_rendering_{true};
-  // Passed before every signal to the guest (SetSignalGate).
-  void PassSignalGate() {
-    if (auto gate = signal_gate_.load(std::memory_order_acquire)) {
+  // Passed before every signal to the guest (SetSignalGate, SetSignalGateTagged).
+  void PassSignalGate(system::GpuSignalKind kind) {
+    if (auto tagged = signal_gate_tagged_.load(std::memory_order_acquire)) {
+      tagged(signal_gate_user_, kind == system::GpuSignalKind::kReadPointer ? passed_tag_ : current_tag_, kind);
+    } else if (auto gate = signal_gate_.load(std::memory_order_acquire)) {
       gate(signal_gate_user_);
     }
   }
   std::atomic<system::GpuSignalGate> signal_gate_{nullptr};
+  std::atomic<system::GpuSignalGateTagged> signal_gate_tagged_{nullptr};
+  std::atomic<system::GpuSubmissionTagger> submission_tagger_{nullptr};
   void* signal_gate_user_ = nullptr;
+  // The guest's submissions with their tags (SetSignalGateTagged): each write of the write pointer, in order. The
+  // submitting thread adds them (UpdateWritePointer, before it stores the write pointer); the command processor takes
+  // them at the start of each run of the ring buffer.
+  struct Submission {
+    uint32_t write_index;
+    uint64_t tag;
+  };
+  std::mutex submissions_mutex_;
+  std::vector<Submission> submissions_;  // guarded by submissions_mutex_
+  // The command processor thread's: the submissions taken and not yet passed, the tag of the one whose packets it
+  // executes (kGpuSignalTagUnknown outside a run of the ring buffer, or when none covers the packet), and the tag
+  // of the last one it passed.
+  std::deque<Submission> pending_submissions_;
+  uint64_t current_tag_ = system::kGpuSignalTagUnknown;
+  uint64_t passed_tag_ = system::kGpuSignalTagUnknown;
+  uint32_t passed_index_ = UINT32_MAX;  // the write pointer of the last submission passed
+  // At a primary packet `position` of a run from `start` to `end` (ring indices): the submissions passed by then
+  // popped, current_tag_ the one the packet belongs to.
+  void TrackSubmissions(uint32_t start, uint32_t end, uint32_t position);
   // The guest's swaps executed (PM4_XE_SWAP), and who is told of each (SetSwapObserver).
   std::atomic<uint64_t> swaps_executed_{0};
   std::atomic<system::GpuSwapObserver> swap_observer_{nullptr};

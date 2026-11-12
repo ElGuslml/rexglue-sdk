@@ -79,6 +79,8 @@ class GraphicsSystem : public system::IGraphicsSystem {
   bool SetHostRendering(bool enabled) override;
   bool SetOcclusionQueryResolver(system::OcclusionQueryResolver resolver, void* user) override;
   bool SetSignalGate(system::GpuSignalGate gate, void* user) override;
+  bool SetSignalGateTagged(system::GpuSubmissionTagger tagger, system::GpuSignalGateTagged gate,
+                           void* user) override;
   void NoteSwapIssued() override { swaps_issued_.fetch_add(1, std::memory_order_acq_rel); }
   bool GetSwapCounts(uint64_t& issued, uint64_t& executed) override;
   bool SetSwapObserver(system::GpuSwapObserver observer, void* user) override;
