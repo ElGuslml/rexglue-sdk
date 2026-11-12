@@ -34,6 +34,10 @@ set(REXSYSTEM_SOURCES
     xam/content_manager.cpp
     xam/user_profile.cpp
 
+    # Online play (online_play)
+    online/virtual_net.cpp
+    online/udp_transport.cpp
+
     ppc_types.cpp
     elf_module.cpp
     entry_table.cpp

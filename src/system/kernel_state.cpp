@@ -170,6 +170,7 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
 
 KernelState::~KernelState() {
   app_manager_.reset();
+  online_net_.reset();
 
   // Stop the dispatch thread before touching the object table
   if (dispatch_thread_running_) {
@@ -230,6 +231,38 @@ KernelState::~KernelState() {
 
 KernelState* KernelState::shared() {
   return shared_kernel_state_;
+}
+
+online::VirtualNet* KernelState::online_net() {
+  std::call_once(online_net_once_, [this] {
+    if (!user_profile_->online()) {
+      return;
+    }
+    uint16_t port = 0;
+    const std::string& host = REXCVAR_GET(online_host);
+    online::Endpoint hub;
+    if (!host.empty()) {
+      hub = online::Endpoint::Parse(host);
+      if (!hub.valid()) {
+        REXSYS_ERROR("Online play: online_host \"{}\" is not address:port", host);
+      }
+    }
+    auto transport =
+        online::CreateUdpTransport(static_cast<uint16_t>(REXCVAR_GET(online_port)), &port);
+    if (!transport) {
+      REXSYS_ERROR("Online play: UDP port {} is taken (another game?); online play is off",
+                   REXCVAR_GET(online_port));
+      return;
+    }
+    online_net_ = std::make_unique<online::VirtualNet>(user_profile_->online_xuid(), title_id(),
+                                                       std::move(transport));
+    online_net_->Start(hub);
+    uint32_t ip = online_net_->self_in_addr();
+    REXSYS_INFO("Online play: UDP port {}, {}; this game is {}.{}.{}.{} to its friends", port,
+                hub.valid() ? "joining " + hub.ToString() : std::string("hosting"), ip >> 24,
+                (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+  });
+  return online_net_.get();
 }
 
 uint32_t KernelState::title_id() const {

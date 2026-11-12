@@ -33,6 +33,21 @@
 
 namespace rex::system {
 
+namespace {
+
+// WSA errors of virtual sockets.
+constexpr uint32_t kWsaEwouldblock = 10035;
+constexpr uint32_t kWsaEmsgsize = 10040;
+constexpr uint32_t kWsaEaddrinuse = 10048;
+constexpr uint32_t kWsaEhostunreach = 10065;
+// ioctlsocket's commands.
+constexpr uint32_t kFionbio = 0x8004667E;
+constexpr uint32_t kFionread = 0x4004667F;
+// Datagrams waiting on a virtual socket at most (the oldest go first).
+constexpr size_t kMaxQueued = 512;
+
+}  // namespace
+
 XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
 
 XSocket::XSocket(KernelState* kernel_state, uint64_t native_handle)
@@ -46,6 +61,15 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
   af_ = af;
   type_ = type;
   proto_ = proto;
+
+  // Online play: a datagram socket (VDP or UDP) is virtual, its datagrams carried between the
+  // players' games; no real port is taken.
+  if (type == Type::X_SOCK_DGRAM) {
+    if (online::VirtualNet* net = kernel_state_->online_net()) {
+      virtual_net_ = net;
+      return X_STATUS_SUCCESS;
+    }
+  }
 
   if (proto == Protocol::X_IPPROTO_VDP) {
     // VDP is a layer on top of UDP.
@@ -61,6 +85,20 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
+  if (virtual_net_) {
+    if (bound_) {
+      virtual_net_->Unbind(this, bound_port_);
+      bound_ = false;
+    }
+    std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+    while (!incoming_packets_.empty()) {
+      delete[] incoming_packets_.front();
+      incoming_packets_.pop();
+    }
+    // A thread waiting in recvfrom() returns.
+    incoming_packet_cv_.notify_all();
+    return X_STATUS_SUCCESS;
+  }
   if (native_handle_ == uint64_t(-1)) {
     return X_STATUS_SUCCESS;
   }
@@ -80,6 +118,12 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
     secure_ = false;
     return X_STATUS_SUCCESS;
   }
+  if (virtual_net_) {
+    if (level == 0xFFFF && optname == 0x0020) {
+      broadcast_socket_ = true;
+    }
+    return X_STATUS_SUCCESS;
+  }
 
   int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
   if (ret < 0) {
@@ -96,6 +140,18 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
 }
 
 X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+  if (virtual_net_) {
+    if (cmd == kFionbio) {
+      nonblocking_ = memory::load_and_swap<uint32_t>(arg_ptr) != 0;
+    } else if (cmd == kFionread) {
+      std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+      uint32_t size = incoming_packets_.empty()
+                          ? 0
+                          : reinterpret_cast<packet*>(incoming_packets_.front())->data_len;
+      memory::store_and_swap<uint32_t>(arg_ptr, size);
+    }
+    return X_STATUS_SUCCESS;
+  }
   int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
   if (ret < 0) {
     // TODO: Get last error
@@ -115,6 +171,16 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
 }
 
 X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
+  if (virtual_net_) {
+    uint16_t port = name->sin_port;
+    if (bound_ || !virtual_net_->Bind(this, &port)) {
+      last_error_ = kWsaEaddrinuse;
+      return X_STATUS_UNSUCCESSFUL;
+    }
+    bound_ = true;
+    bound_port_ = port;
+    return X_STATUS_SUCCESS;
+  }
   int ret = bind(native_handle_, (sockaddr*)name, name_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -168,6 +234,42 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
                       uint32_t* from_len) {
+  if (virtual_net_) {
+    std::unique_lock<std::mutex> lock(incoming_packet_mutex_);
+    if (incoming_packets_.empty()) {
+      if (nonblocking_) {
+        last_error_ = kWsaEwouldblock;
+        return -1;
+      }
+      incoming_packet_cv_.wait(lock, [this] { return !incoming_packets_.empty() || !bound_; });
+      if (incoming_packets_.empty()) {
+        last_error_ = kWsaEwouldblock;
+        return -1;
+      }
+    }
+    packet* pkt = reinterpret_cast<packet*>(incoming_packets_.front());
+    incoming_packets_.pop();
+    int size = pkt->data_len;
+    if (uint32_t(size) > buf_len) {
+      // As a real datagram socket: the start of it, and WSAEMSGSIZE.
+      std::memcpy(buf, pkt->data, buf_len);
+      last_error_ = kWsaEmsgsize;
+      size = -1;
+    } else {
+      std::memcpy(buf, pkt->data, size);
+    }
+    if (from) {
+      from->sin_family = 2;
+      from->sin_addr = pkt->src_ip;
+      from->sin_port = pkt->src_port;
+      std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+    }
+    if (from_len) {
+      *from_len = sizeof(N_XSOCKADDR_IN);
+    }
+    delete[] reinterpret_cast<uint8_t*>(pkt);
+    return size;
+  }
   // Pop from secure packets first
   // TODO(DrChat): Enable when I commit XNet
   /*
@@ -215,6 +317,30 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
                     uint32_t to_len) {
+  if (virtual_net_) {
+    if (!to) {
+      last_error_ = kWsaEhostunreach;
+      return -1;
+    }
+    if (!bound_) {
+      // A socket sending before bind() gets a port, as a real one.
+      uint16_t port = 0;
+      if (virtual_net_->Bind(this, &port)) {
+        bound_ = true;
+        bound_port_ = port;
+      }
+    }
+    uint32_t dst = to->sin_addr;
+    if (dst == 0xFFFFFFFF) {
+      // A broadcast (system link): nobody to hear it online.
+      return int(buf_len);
+    }
+    int sent = virtual_net_->SendTo(bound_port_, dst, to->sin_port, buf, buf_len);
+    if (sent < 0) {
+      last_error_ = buf_len > online::VirtualNet::kMaxDatagram ? kWsaEmsgsize : kWsaEhostunreach;
+    }
+    return sent;
+  }
   // Send 2 copies of the packet: One to XNet (for network security) and an
   // unencrypted copy for other Xenia hosts.
   // TODO(DrChat): Enable when I commit XNet.
@@ -235,6 +361,23 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
 
   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
                 to ? (sockaddr*)&nto : nullptr, to_len);
+}
+
+bool XSocket::HasPacket() {
+  std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+  return !incoming_packets_.empty();
+}
+
+void XSocket::Deliver(uint32_t src_in_addr, uint16_t src_port, const uint8_t* data, size_t size) {
+  {
+    std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
+    while (incoming_packets_.size() >= kMaxQueued) {
+      delete[] incoming_packets_.front();
+      incoming_packets_.pop();
+    }
+  }
+  QueuePacket(src_in_addr, src_port, data, size);
+  incoming_packet_cv_.notify_one();
 }
 
 bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len) {

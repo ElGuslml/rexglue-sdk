@@ -12,7 +12,14 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <random>
+#include <thread>
 
 #if REX_PLATFORM_MAC
 #include <sys/select.h>
@@ -60,15 +67,9 @@ enum {
   NUM_XNCALLER_TYPES = 0x4,
 };
 
-// https://github.com/pmrowla/hl2sdk-csgo/blob/master/common/xbox/xboxstubs.h
-typedef struct {
-  // FYI: IN_ADDR should be in network-byte order.
-  in_addr ina;                    // IP address (zero if not static/DHCP)
-  in_addr inaOnline;              // Online IP address (zero if not online)
-  rex::be<uint16_t> wPortOnline;  // Online port
-  uint8_t abEnet[6];              // Ethernet MAC address
-  uint8_t abOnline[20];           // Online identification
-} XNADDR;
+using online::XNADDR;
+using online::XNQOS;
+using online::XNQOSINFO;
 
 typedef struct {
   rex::be<int32_t> status;
@@ -76,24 +77,6 @@ typedef struct {
   in_addr aina[8];
 } XNDNS;
 
-typedef struct {
-  uint8_t flags;
-  uint8_t reserved;
-  rex::be<uint16_t> probes_xmit;
-  rex::be<uint16_t> probes_recv;
-  rex::be<uint16_t> data_len;
-  rex::be<uint32_t> data_ptr;
-  rex::be<uint16_t> rtt_min_in_msecs;
-  rex::be<uint16_t> rtt_med_in_msecs;
-  rex::be<uint32_t> up_bits_per_sec;
-  rex::be<uint32_t> down_bits_per_sec;
-} XNQOSINFO;
-
-typedef struct {
-  rex::be<uint32_t> count;
-  rex::be<uint32_t> count_pending;
-  XNQOSINFO info[1];
-} XNQOS;
 
 struct Xsockaddr_t {
   rex::be<uint16_t> sa_family;
@@ -435,10 +418,21 @@ struct XnAddrStatus {
   static const uint32_t XNET_GET_XNADDR_TROUBLESHOOT = 0x00008000;
 };
 
+// Online play: the virtual network (online_play), null when it is off.
+online::VirtualNet* OnlineNet() {
+  return REX_KERNEL_STATE()->online_net();
+}
+
 u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+  if (auto* net = OnlineNet()) {
+    // Signed in to Live: an address of the virtual network, online.
+    net->GetTitleXnAddr(addr_ptr);
+    return XnAddrStatus::XNET_GET_XNADDR_DHCP | XnAddrStatus::XNET_GET_XNADDR_GATEWAY |
+           XnAddrStatus::XNET_GET_XNADDR_DNS | XnAddrStatus::XNET_GET_XNADDR_ONLINE;
+  }
   // Just return a loopback address atm.
-  addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
-  addr_ptr->inaOnline.s_addr = 0;
+  addr_ptr->ina = INADDR_LOOPBACK;
+  addr_ptr->inaOnline = 0;
   addr_ptr->wPortOnline = 0;
 
   // TODO(gibbed): A proper mac address.
@@ -473,21 +467,100 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
 
 void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string string_out,
                                      u32 string_size) {
+  if (OnlineNet()) {
+    uint32_t ip = in_addr;
+    rex::string::copy_truncating(
+        string_out,
+        fmt::format("{}.{}.{}.{}", ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF),
+        string_size);
+    return;
+  }
   rex::string::copy_truncating(string_out, "666.666.666.666", string_size);
 }
 
 // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
 // subsequent socket calls (like a handle to a XNet address)
 u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
-                                    mapped_void in_addr) {
+                                    mapped_u32 in_addr) {
+  if (auto* net = OnlineNet(); net && xn_addr && in_addr) {
+    uint32_t ina = 0;
+    uint32_t result = net->XnAddrToInAddr(*xn_addr, &ina);
+    if (result == 0) {
+      *in_addr = ina;
+    }
+    return result;
+  }
   return 1;
 }
 
-// Does the reverse of the above.
-// FIXME: Arguments may not be correct.
-u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, mapped_void in_addr, ppc_ptr_t<XNADDR> xn_addr,
+// Does the reverse of the above (the IN_ADDR by value).
+u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 in_addr, ppc_ptr_t<XNADDR> xn_addr,
                                     mapped_void xid) {
+  if (auto* net = OnlineNet(); net && xn_addr) {
+    uint32_t result = net->InAddrToXnAddr(in_addr, xn_addr);
+    if (xid) {
+      std::memset(xid, 0, online::kXnKidSize);
+    }
+    return result;
+  }
   return 1;
+}
+
+// Online play's XNet calls below were stubs, which returned their first argument (r3 unchanged):
+// without online play they still do.
+u32 NetDll_XNetUnregisterInAddr_entry(u32 caller, u32 in_addr) {
+  if (auto* net = OnlineNet()) {
+    return net->UnregisterInAddr(in_addr);
+  }
+  return caller;
+}
+
+u32 NetDll_XNetConnect_entry(u32 caller, u32 in_addr) {
+  if (auto* net = OnlineNet()) {
+    return net->Connect(in_addr);
+  }
+  return caller;
+}
+
+u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 in_addr) {
+  if (auto* net = OnlineNet()) {
+    return net->GetConnectStatus(in_addr);
+  }
+  return caller;
+}
+
+u32 NetDll_XNetCreateKey_entry(u32 caller, mapped_void xnkid, mapped_void xnkey) {
+  if (OnlineNet() && xnkid && xnkey) {
+    // A peer session's key ID (XNET_XNKID_ONLINE_PEER in its first byte's high nibble) and key.
+    std::random_device random;
+    auto* kid = static_cast<uint8_t*>(static_cast<void*>(xnkid));
+    auto* key = static_cast<uint8_t*>(static_cast<void*>(xnkey));
+    for (size_t i = 0; i < online::kXnKidSize; ++i) {
+      kid[i] = uint8_t(random());
+    }
+    kid[0] = (kid[0] & 0x0F) | 0x80;
+    for (size_t i = 0; i < online::kXnKeySize; ++i) {
+      key[i] = uint8_t(random());
+    }
+    return 0;
+  }
+  return caller;
+}
+
+u32 NetDll_XNetRegisterKey_entry(u32 caller, mapped_void xnkid, mapped_void xnkey) {
+  if (auto* net = OnlineNet(); net && xnkid) {
+    return net->RegisterKey(static_cast<const uint8_t*>(static_cast<void*>(xnkid)),
+                            xnkey ? static_cast<const uint8_t*>(static_cast<void*>(xnkey)) : nullptr);
+  }
+  REXKRNL_WARN("__imp__NetDll_XNetRegisterKey STUB");
+  return caller;
+}
+
+u32 NetDll_XNetUnregisterKey_entry(u32 caller, mapped_void xnkid) {
+  if (auto* net = OnlineNet(); net && xnkid) {
+    return net->UnregisterKey(static_cast<const uint8_t*>(static_cast<void*>(xnkid)));
+  }
+  return caller;
 }
 
 // https://www.google.com/patents/WO2008112448A1?cl=en
@@ -555,9 +628,145 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
   return 0;
 }
 
+// An XNQOS of XNetQosLookup (online play) being filled on the network thread: freed by
+// XNetQosRelease, or when its last target is done if it was released before.
+struct QosLookupMemory {
+  std::mutex mutex;
+  uint32_t qos = 0;
+  uint32_t event_handle = 0;
+  std::vector<uint32_t> data_blocks;
+  size_t pending = 0;
+  bool released = false;
+};
+std::mutex qos_lookups_mutex;
+std::map<uint32_t, std::shared_ptr<QosLookupMemory>> qos_lookups;
+
+void FreeQosLookupMemory(QosLookupMemory& lookup) {
+  for (uint32_t block : lookup.data_blocks) {
+    REX_KERNEL_MEMORY()->SystemHeapFree(block);
+  }
+  lookup.data_blocks.clear();
+  REX_KERNEL_MEMORY()->SystemHeapFree(lookup.qos);
+}
+
+void SetEventByHandle(uint32_t event_handle) {
+  if (event_handle) {
+    if (auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(event_handle)) {
+      ev->Set(0, false);
+    }
+  }
+}
+
+u32 NetDll_XNetQosLookup_entry(u32 caller, u32 count, mapped_u32 xnaddrs, mapped_u32 xnkids,
+                               mapped_u32 xnkeys, u32 ina_count, mapped_u32 inas,
+                               mapped_u32 service_ids, u32 probes, u32 bits_per_sec, u32 flags,
+                               u32 event_handle, mapped_u32 qos_out) {
+  auto* net = OnlineNet();
+  if (!net) {
+    REXKRNL_WARN("__imp__NetDll_XNetQosLookup STUB");
+    return caller;
+  }
+  if (!qos_out) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  // Peers' addresses (XNADDRs) are probed; title servers (IN_ADDRs with service IDs) are not
+  // online: complete, never contacted.
+  uint32_t total = count + ina_count;
+  uint32_t size =
+      uint32_t(offsetof(XNQOS, info) + sizeof(XNQOSINFO) * std::max<uint32_t>(total, 1));
+  auto* memory = REX_KERNEL_MEMORY();
+  uint32_t qos_guest = memory->SystemHeapAlloc(size);
+  auto* qos = memory->TranslateVirtual<XNQOS*>(qos_guest);
+  std::memset(qos, 0, size);
+  qos->count = total;
+  qos->count_pending = count;
+  for (uint32_t i = count; i < total; ++i) {
+    qos->info[i].flags = online::kQosComplete;
+  }
+  *qos_out = qos_guest;
+
+  auto lookup = std::make_shared<QosLookupMemory>();
+  lookup->qos = qos_guest;
+  lookup->event_handle = event_handle;
+  lookup->pending = count;
+  {
+    std::lock_guard lock(qos_lookups_mutex);
+    qos_lookups[qos_guest] = lookup;
+  }
+  if (!count) {
+    SetEventByHandle(event_handle);
+    return 0;
+  }
+  std::vector<std::pair<XNADDR, std::array<uint8_t, online::kXnKidSize>>> targets(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    uint32_t addr = xnaddrs ? uint32_t(xnaddrs[i]) : 0;
+    uint32_t kid = xnkids ? uint32_t(xnkids[i]) : 0;
+    if (addr) {
+      targets[i].first = *memory->TranslateVirtual<XNADDR*>(addr);
+    } else {
+      std::memset(&targets[i].first, 0, sizeof(XNADDR));
+    }
+    if (kid) {
+      std::memcpy(targets[i].second.data(), memory->TranslateVirtual<uint8_t*>(kid),
+                  online::kXnKidSize);
+    }
+  }
+  REXKRNL_DEBUG("XNetQosLookup({} targets, {} probes) -> {:08X}", count, probes, qos_guest);
+  net->QosLookup(targets, probes, [lookup](size_t index, const online::QosResult& result) {
+    std::lock_guard lock(lookup->mutex);
+    auto* memory = REX_KERNEL_MEMORY();
+    if (!lookup->released) {
+      auto* qos = memory->TranslateVirtual<XNQOS*>(lookup->qos);
+      XNQOSINFO& info = qos->info[index];
+      info.probes_xmit = result.probes_xmit;
+      info.probes_recv = result.probes_recv;
+      info.rtt_min_in_msecs = result.rtt_min_ms;
+      info.rtt_med_in_msecs = result.rtt_med_ms;
+      info.up_bits_per_sec = result.up_bits_per_sec;
+      info.down_bits_per_sec = result.down_bits_per_sec;
+      if (!result.data.empty()) {
+        uint32_t block = memory->SystemHeapAlloc(uint32_t(result.data.size()));
+        std::memcpy(memory->TranslateVirtual(block), result.data.data(), result.data.size());
+        lookup->data_blocks.push_back(block);
+        info.data_ptr = block;
+        info.data_len = uint16_t(result.data.size());
+      }
+      // The flags last: the game reads a target as done when they say so.
+      std::atomic_thread_fence(std::memory_order_release);
+      info.flags = result.flags;
+      qos->count_pending = uint32_t(qos->count_pending) - 1;
+    }
+    if (--lookup->pending == 0) {
+      if (lookup->released) {
+        FreeQosLookupMemory(*lookup);
+      } else {
+        SetEventByHandle(lookup->event_handle);
+      }
+    }
+  });
+  return 0;
+}
+
 u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
   if (!qos) {
     return X_STATUS_INVALID_PARAMETER;
+  }
+  std::shared_ptr<QosLookupMemory> lookup;
+  {
+    std::lock_guard lock(qos_lookups_mutex);
+    auto it = qos_lookups.find(qos.guest_address());
+    if (it != qos_lookups.end()) {
+      lookup = it->second;
+      qos_lookups.erase(it);
+    }
+  }
+  if (lookup) {
+    std::lock_guard lock(lookup->mutex);
+    lookup->released = true;
+    if (lookup->pending == 0) {
+      FreeQosLookupMemory(*lookup);
+    }
+    return 0;
   }
   REX_KERNEL_MEMORY()->SystemHeapFree(qos.guest_address());
   return 0;
@@ -565,6 +774,11 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
 
 u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
                                u32 flags) {
+  if (auto* net = OnlineNet(); net && id) {
+    return net->QosListen(static_cast<const uint8_t*>(static_cast<void*>(id)),
+                          data ? static_cast<const uint8_t*>(static_cast<void*>(data)) : nullptr,
+                          data_size, flags);
+  }
   return X_ERROR_FUNCTION_FAILED;
 }
 
@@ -678,7 +892,8 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
   N_XSOCKADDR_IN native_name(name);
   X_STATUS status = socket->Bind(&native_name, namelen);
   if (XFAILED(status)) {
-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+    XThread::SetLastError(socket->is_virtual() ? socket->last_error()
+                                               : xboxkrnl::xeRtlNtStatusToDosError(status));
     return -1;
   }
 
@@ -804,9 +1019,105 @@ struct host_set {
   }
 };
 
+// select() over virtual sockets (online play), alone or with real ones: a virtual socket is readable
+// with a datagram waiting and always writable; real ones are asked without waiting, until something
+// is ready or the timeout passes.
+i32 SelectWithVirtualSockets(host_set* read, host_set* write, host_set* except,
+                             const timeval* timeout) {
+  const auto start = std::chrono::steady_clock::now();
+  for (;;) {
+    host_set ready_read = {}, ready_write = {};
+    fd_set native_read, native_write, native_except;
+    FD_ZERO(&native_read);
+    FD_ZERO(&native_write);
+    FD_ZERO(&native_except);
+    bool any_native = false;
+    for (host_set* set : {read, write, except}) {
+      if (!set) {
+        continue;
+      }
+      for (uint32_t i = 0; i < set->count; ++i) {
+        if (!set->sockets[i]->is_virtual()) {
+          any_native = true;
+          FD_SET(set->sockets[i]->native_handle(),
+                 set == read ? &native_read : set == write ? &native_write : &native_except);
+        }
+      }
+    }
+    if (any_native) {
+      timeval zero = {0, 0};
+      select(0, &native_read, &native_write, &native_except, &zero);
+    }
+    int ready = 0;
+    host_set* sets[3] = {read, write, except};
+    fd_set* natives[3] = {&native_read, &native_write, &native_except};
+    host_set results[3] = {};
+    for (int k = 0; k < 3; ++k) {
+      if (!sets[k]) {
+        continue;
+      }
+      for (uint32_t i = 0; i < sets[k]->count; ++i) {
+        auto& socket = sets[k]->sockets[i];
+        bool is_ready = socket->is_virtual()
+                            ? (k == 0 ? socket->HasPacket() : k == 1)
+                            : FD_ISSET(socket->native_handle(), natives[k]) != 0;
+        if (is_ready) {
+          results[k].sockets[results[k].count++] = socket;
+          ++ready;
+        }
+      }
+    }
+    bool timed_out =
+        timeout && std::chrono::steady_clock::now() - start >=
+                       std::chrono::seconds(timeout->tv_sec) +
+                           std::chrono::microseconds(timeout->tv_usec);
+    if (ready || timed_out) {
+      for (int k = 0; k < 3; ++k) {
+        if (sets[k]) {
+          *sets[k] = results[k];
+        }
+      }
+      return ready;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
 i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
                         ppc_ptr_t<x_fd_set> writefds, ppc_ptr_t<x_fd_set> exceptfds,
                         mapped_void timeout_ptr) {
+  if (OnlineNet()) {
+    host_set sets[3] = {};
+    x_fd_set* guest_sets[3] = {readfds, writefds, exceptfds};
+    bool any_virtual = false;
+    for (int k = 0; k < 3; ++k) {
+      if (guest_sets[k]) {
+        sets[k].Load(guest_sets[k]);
+        for (uint32_t i = 0; i < sets[k].count; ++i) {
+          any_virtual |= sets[k].sockets[i]->is_virtual();
+        }
+      }
+    }
+    if (any_virtual) {
+      timeval timeout;
+      if (timeout_ptr) {
+        timeout = {static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[0]),
+                   static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[1])};
+        chrono::Clock::ScaleGuestDurationTimeval(reinterpret_cast<int32_t*>(&timeout.tv_sec),
+                                                 reinterpret_cast<int32_t*>(&timeout.tv_usec));
+      }
+      i32 ret = SelectWithVirtualSockets(readfds ? &sets[0] : nullptr,
+                                         writefds ? &sets[1] : nullptr,
+                                         exceptfds ? &sets[2] : nullptr,
+                                         timeout_ptr ? &timeout : nullptr);
+      for (int k = 0; k < 3; ++k) {
+        if (guest_sets[k]) {
+          sets[k].Store(guest_sets[k]);
+        }
+      }
+      return ret;
+    }
+  }
   host_set host_readfds = {};
   fd_set native_readfds = {};
   if (readfds) {
@@ -892,6 +1203,10 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
   }
 
   if (ret == -1) {
+    if (socket->is_virtual()) {
+      XThread::SetLastError(socket->last_error());
+      return ret;
+    }
 // TODO: Better way of getting the error code
 #if REX_PLATFORM_WIN32
     uint32_t error_code = WSAGetLastError();
@@ -925,7 +1240,11 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 
   }
 
   N_XSOCKADDR_IN native_to(to_ptr);
-  return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  int ret = socket->SendTo(buf_ptr, buf_len, flags, to_ptr ? &native_to : nullptr, to_len);
+  if (ret == -1 && socket->is_virtual()) {
+    XThread::SetLastError(socket->last_error());
+  }
+  return ret;
 }
 
 u32 NetDll___WSAFDIsSet_entry(u32 socket_handle, ppc_ptr_t<x_fd_set> fd_set) {
@@ -1039,25 +1358,25 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
 REX_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
 REX_EXPORT_STUB(__imp__NetDll_XHttpStartup);
 REX_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
-REX_EXPORT_STUB(__imp__NetDll_XNetConnect);
-REX_EXPORT_STUB(__imp__NetDll_XNetCreateKey);
+REX_EXPORT(__imp__NetDll_XNetConnect, rex::kernel::xam::NetDll_XNetConnect_entry)
+REX_EXPORT(__imp__NetDll_XNetCreateKey, rex::kernel::xam::NetDll_XNetCreateKey_entry)
 REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseLookup);
 REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseRelease);
 REX_EXPORT_STUB(__imp__NetDll_XNetGetBroadcastVersionStatus);
-REX_EXPORT_STUB(__imp__NetDll_XNetGetConnectStatus);
+REX_EXPORT(__imp__NetDll_XNetGetConnectStatus, rex::kernel::xam::NetDll_XNetGetConnectStatus_entry)
 REX_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
 REX_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
 REX_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
 REX_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
-REX_EXPORT_STUB(__imp__NetDll_XNetQosLookup);
-REX_EXPORT_STUB(__imp__NetDll_XNetRegisterKey);
+REX_EXPORT(__imp__NetDll_XNetQosLookup, rex::kernel::xam::NetDll_XNetQosLookup_entry)
+REX_EXPORT(__imp__NetDll_XNetRegisterKey, rex::kernel::xam::NetDll_XNetRegisterKey_entry)
 REX_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
 REX_EXPORT_STUB(__imp__NetDll_XNetServerToInAddr);
 REX_EXPORT_STUB(__imp__NetDll_XNetSetOpt);
 REX_EXPORT_STUB(__imp__NetDll_XNetStartupEx);
 REX_EXPORT_STUB(__imp__NetDll_XNetTsAddrToInAddr);
-REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterInAddr);
-REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterKey);
+REX_EXPORT(__imp__NetDll_XNetUnregisterInAddr, rex::kernel::xam::NetDll_XNetUnregisterInAddr_entry)
+REX_EXPORT(__imp__NetDll_XNetUnregisterKey, rex::kernel::xam::NetDll_XNetUnregisterKey_entry)
 REX_EXPORT_STUB(__imp__NetDll_XmlDownloadContinue);
 REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetParseTime);
 REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetReceivedDataSize);

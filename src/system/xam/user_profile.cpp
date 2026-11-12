@@ -29,6 +29,12 @@ REXCVAR_DEFINE_BOOL(online_play, false, "Online",
                     "Online play between friends (experimental): the profile is signed in to Xbox "
                     "Live with an online XUID of its own (kept in its folder, online_xuid.txt), has "
                     "the multiplayer privileges and a network cable. Off: offline, as before");
+REXCVAR_DEFINE_UINT32(online_port, 3074, "Online",
+                      "Online play: the UDP port this PC's game takes for its friends (one port "
+                      "for every player; a second instance on one PC needs another)");
+REXCVAR_DEFINE_STRING(online_host, "", "Online",
+                      "Online play: the friend whose game to join, as address:port (a direct "
+                      "connection); empty: this PC's game is the host its friends join");
 REXCVAR_DEFINE_STRING(online_xuid, "", "Online",
                       "The online XUID to use instead of the profile's (16 hexadecimal digits), for "
                       "two instances of a game on one PC with copies of one profile. Empty: the "

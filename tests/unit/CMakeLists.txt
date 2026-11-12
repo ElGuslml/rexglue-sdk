@@ -16,6 +16,7 @@ add_executable(unit_tests
     system/guest_path_test.cpp
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
+    system/virtual_net_test.cpp
     input/input_assignment_test.cpp
     input/mnk_binds_test.cpp
     codegen/codegen_writer_test.cpp

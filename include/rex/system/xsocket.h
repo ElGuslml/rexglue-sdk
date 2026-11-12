@@ -10,10 +10,12 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <condition_variable>
 #include <cstring>
 #include <queue>
 
 #include <rex/math.h>
+#include <rex/system/online/virtual_net.h>
 #include <rex/system/xobject.h>
 #include <rex/types.h>
 
@@ -67,7 +69,7 @@ struct N_XSOCKADDR_IN {
   char x_sin_zero[8];
 };
 
-class XSocket : public XObject {
+class XSocket : public XObject, public online::PacketSink {
  public:
   static const XObject::Type kObjectType = XObject::Type::Socket;
 
@@ -127,6 +129,15 @@ class XSocket : public XObject {
   // Queue a packet into our internal buffer.
   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len);
 
+  // Online play: a datagram socket of the virtual network (online::VirtualNet) instead of a real
+  // one: bound to a virtual port, its datagrams carried to and from the peers.
+  bool is_virtual() const { return virtual_net_ != nullptr; }
+  // The WSA error of a virtual socket's last failed call (WSAEWOULDBLOCK when nothing is waiting).
+  uint32_t last_error() const { return last_error_; }
+  // A virtual socket with a datagram waiting (select).
+  bool HasPacket();
+  void Deliver(uint32_t src_in_addr, uint16_t src_port, const uint8_t* data, size_t size) override;
+
  private:
   XSocket(KernelState* kernel_state, uint64_t native_handle);
   uint64_t native_handle_ = -1;
@@ -144,6 +155,11 @@ class XSocket : public XObject {
   std::unique_ptr<rex::thread::Event> event_;
   std::mutex incoming_packet_mutex_;
   std::queue<uint8_t*> incoming_packets_;
+
+  online::VirtualNet* virtual_net_ = nullptr;
+  bool nonblocking_ = false;
+  uint32_t last_error_ = 0;
+  std::condition_variable incoming_packet_cv_;
 };
 
 }  // namespace rex::system
