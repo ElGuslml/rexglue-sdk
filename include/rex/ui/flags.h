@@ -13,6 +13,9 @@
 
 #include <rex/cvar.h>
 
+// The GPU the player chose (graphics_util.cpp: ChosenGpuAdapter)
+REXCVAR_DECLARE(std::string, gpu_adapter);
+
 // Presenter
 REXCVAR_DECLARE(bool, present_render_pass_clear);
 REXCVAR_DECLARE(bool, present_letterbox);

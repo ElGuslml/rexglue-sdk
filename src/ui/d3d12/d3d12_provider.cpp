@@ -17,6 +17,7 @@
 #include <rex/ui/d3d12/d3d12_immediate_drawer.h>
 #include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
+#include <rex/ui/graphics_util.h>
 
 #include <malloc.h>
 
@@ -250,10 +251,27 @@ bool D3D12Provider::Initialize() {
     return false;
   }
 
-  // Choose the adapter.
+  // Choose the adapter: the player's (gpu_adapter), else by d3d12_adapter.
   uint32_t adapter_index = 0;
   IDXGIAdapter1* adapter = nullptr;
-  while (dxgi_factory->EnumAdapters1(adapter_index, &adapter) == S_OK) {
+  uint32_t chosen_vendor = 0, chosen_device = 0;
+  if (ChosenGpuAdapter(chosen_vendor, chosen_device)) {
+    for (uint32_t i = 0; dxgi_factory->EnumAdapters1(i, &adapter) == S_OK; ++i) {
+      DXGI_ADAPTER_DESC1 desc;
+      if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+          desc.VendorId == chosen_vendor && desc.DeviceId == chosen_device &&
+          SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
+        break;
+      }
+      adapter->Release();
+      adapter = nullptr;
+    }
+    if (!adapter) {
+      REXLOG_WARN("gpu_adapter {:04X}:{:04X} not found among the Direct3D 12 adapters: the default one",
+                  chosen_vendor, chosen_device);
+    }
+  }
+  while (!adapter && dxgi_factory->EnumAdapters1(adapter_index, &adapter) == S_OK) {
     DXGI_ADAPTER_DESC1 adapter_desc;
     if (SUCCEEDED(adapter->GetDesc1(&adapter_desc))) {
       if (SUCCEEDED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device),

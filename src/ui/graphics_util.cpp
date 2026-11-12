@@ -13,6 +13,17 @@
 
 #include <rex/ui/graphics_util.h>
 
+#include <cstdio>
+#include <string>
+
+#include <rex/cvar.h>
+#include <rex/ui/flags.h>
+
+REXCVAR_DEFINE_STRING(gpu_adapter, "", "GPU",
+                      "The GPU to draw with, by its PCI vendor and device IDs in hexadecimal (\"10DE:2782\"), for "
+                      "D3D12, Vulkan and NativeXRenderer alike; empty: each one's own choice (d3d12_adapter, "
+                      "vulkan_device). A GPU not found leaves that choice, with a warning");
+
 namespace rex {
 namespace ui {
 
@@ -59,6 +70,18 @@ int32_t FloatToD3D11Fixed16p8(float f32) {
     result.s >>= extra_bits;
   }
   return result.s;
+}
+
+bool ChosenGpuAdapter(uint32_t& vendor_id, uint32_t& device_id) {
+  const std::string& text = REXCVAR_GET(gpu_adapter);
+  unsigned vendor = 0, device = 0;
+  char rest = 0;
+  if (text.empty() || std::sscanf(text.c_str(), "%x:%x%c", &vendor, &device, &rest) != 2 || !vendor) {
+    return false;
+  }
+  vendor_id = vendor;
+  device_id = device;
+  return true;
 }
 
 }  // namespace ui

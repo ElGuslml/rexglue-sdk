@@ -24,5 +24,10 @@ namespace ui {
 // for use with the top-left rasterization rule later.
 int32_t FloatToD3D11Fixed16p8(float f32);
 
+// The GPU the player chose (gpu_adapter, "VVVV:DDDD": its PCI vendor and device IDs in hexadecimal, the same in
+// DXGI, Vulkan and DiligentCore): true with the IDs when it is set and well formed, false for each backend's own
+// choice.
+bool ChosenGpuAdapter(uint32_t& vendor_id, uint32_t& device_id);
+
 }  // namespace ui
 }  // namespace rex

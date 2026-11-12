@@ -14,6 +14,7 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/ui/graphics_util.h>
 #include <rex/ui/vulkan/immediate_drawer.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/provider.h>
@@ -75,7 +76,27 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
     REXLOG_WARN("* {}: {}", physical_device_index, physical_device_properties.deviceName);
   }
 
-  if (REXCVAR_GET(vulkan_device) >= 0 &&
+  // The player's GPU (gpu_adapter) first, then vulkan_device, then the automatic choice.
+  uint32_t chosen_vendor = 0, chosen_device = 0;
+  if (ChosenGpuAdapter(chosen_vendor, chosen_device)) {
+    for (VkPhysicalDevice physical_device : physical_devices) {
+      VkPhysicalDeviceProperties properties;
+      ifn.vkGetPhysicalDeviceProperties(physical_device, &properties);
+      if (properties.vendorID == chosen_vendor && properties.deviceID == chosen_device) {
+        provider->vulkan_device_ = VulkanDevice::CreateIfSupported(
+            provider->vulkan_instance_.get(), physical_device, with_gpu_emulation, with_presentation);
+        if (provider->vulkan_device_) {
+          break;
+        }
+      }
+    }
+    if (!provider->vulkan_device_) {
+      REXLOG_WARN("gpu_adapter {:04X}:{:04X} not found among the Vulkan devices: the default one", chosen_vendor,
+                  chosen_device);
+    }
+  }
+
+  if (!provider->vulkan_device_ && REXCVAR_GET(vulkan_device) >= 0 &&
       uint32_t(REXCVAR_GET(vulkan_device)) < physical_devices.size()) {
     provider->vulkan_device_ = VulkanDevice::CreateIfSupported(
         provider->vulkan_instance_.get(), physical_devices[REXCVAR_GET(vulkan_device)],
