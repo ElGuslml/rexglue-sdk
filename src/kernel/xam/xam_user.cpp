@@ -55,8 +55,13 @@ namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
 
-// XUSER_SIGNIN_INFO's dwInfoFlags: the user is a guest.
+// XUSER_SIGNIN_INFO's dwInfoFlags: the user can play on Xbox Live (XUSER_INFO_FLAG_LIVE_ENABLED),
+// the user is a guest.
+constexpr uint32_t kUserInfoFlagLiveEnabled = 0x1;
 constexpr uint32_t kUserInfoFlagGuest = 0x2;
+
+// XamUserGetSigninInfo's flags: the offline XUID even when signed in to Live.
+constexpr uint32_t kSigninInfoOfflineXuidOnly = 0x2;
 
 bool xeXamIsGuestUser(uint32_t user_index) {
   if (!REXCVAR_GET(signin_guests) || user_index == 0 || user_index >= 4) {
@@ -71,18 +76,36 @@ bool xeXamIsGuestUser(uint32_t user_index) {
 
 namespace {
 
-// A guest's XUID: the profile's with the guest's number in its high word, one per user.
-uint64_t GuestXuid(uint32_t user_index) {
-  return REX_KERNEL_STATE()->user_profile()->xuid() ^ (uint64_t(user_index) << 32);
+// A guest's XUID: the profile's (offline, or online with online play) with the guest's number in its
+// high word, one per user.
+uint64_t GuestXuid(uint32_t user_index, bool online = false) {
+  const auto* user_profile = REX_KERNEL_STATE()->user_profile();
+  uint64_t xuid = online && user_profile->online() ? user_profile->online_xuid() : user_profile->xuid();
+  return xuid ^ (uint64_t(user_index) << 32);
 }
 
 bool IsGuestXuid(uint64_t xuid) {
   for (uint32_t user_index = 1; user_index < 4; ++user_index) {
-    if (xuid == GuestXuid(user_index)) {
+    if (xuid == GuestXuid(user_index) || xuid == GuestXuid(user_index, true)) {
       return true;
     }
   }
   return false;
+}
+
+// Privileges (XPRIVILEGE_*) a profile signed in to Xbox Live does not have with online play: voice and
+// video chat (the game's own; friends talk elsewhere) and buying content (there is no marketplace).
+bool IsPrivilegeWithheld(uint32_t privilege) {
+  switch (privilege) {
+    case 252:  // XPRIVILEGE_COMMUNICATIONS
+    case 251:  // XPRIVILEGE_COMMUNICATIONS_FRIENDS_ONLY
+    case 235:  // XPRIVILEGE_VIDEO_COMMUNICATIONS
+    case 234:  // XPRIVILEGE_VIDEO_COMMUNICATIONS_FRIENDS_ONLY
+    case 245:  // XPRIVILEGE_PURCHASE_CONTENT
+      return true;
+    default:
+      return false;
+  }
 }
 
 // "Name (1)": the profile's name, cut so that the number fits in its 15 characters.
@@ -110,8 +133,8 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
       auto type = user_profile->type() & type_mask;
       if (type & (2 | 4)) {
-        // maybe online profile?
-        xuid = user_profile->xuid();
+        // maybe online profile? (the online XUID with online play)
+        xuid = user_profile->signin_xuid();
         result = X_E_SUCCESS;
       } else if (type & 1) {
         // maybe offline profile?
@@ -119,7 +142,7 @@ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
         result = X_E_SUCCESS;
       }
     } else if (xeXamIsGuestUser(user_index)) {
-      xuid = GuestXuid(user_index);
+      xuid = GuestXuid(user_index, (type_mask & (2 | 4)) != 0);
       result = X_E_SUCCESS;
     }
   } else {
@@ -157,9 +180,12 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
 
   std::memset(info, 0, sizeof(X_USER_SIGNIN_INFO));
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  // Online play: signed in to Live, the online XUID unless the offline one is asked for.
+  const bool online_xuid = user_profile->online() && !(flags & kSigninInfoOfflineXuidOnly);
+  const uint32_t live_flag = user_profile->online() ? kUserInfoFlagLiveEnabled : 0;
   if (xeXamIsGuestUser(user_index)) {
-    info->xuid = GuestXuid(user_index);
-    info->info_flags = kUserInfoFlagGuest;
+    info->xuid = GuestXuid(user_index, online_xuid);
+    info->info_flags = kUserInfoFlagGuest | live_flag;
     info->signin_state = user_profile->signin_state();
     info->guest_number = static_cast<uint32_t>(user_index);
     info->sponsor_user_index = 0;
@@ -170,7 +196,8 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
     return X_E_NO_SUCH_USER;
   }
 
-  info->xuid = user_profile->xuid();
+  info->xuid = online_xuid ? user_profile->online_xuid() : user_profile->xuid();
+  info->info_flags = live_flag;
   info->signin_state = user_profile->signin_state();
   rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
   return X_E_SUCCESS;
@@ -238,7 +265,8 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
     // TODO(gibbed): allow proper lookup of arbitrary XUIDs
     const auto& user_profile = REX_KERNEL_STATE()->user_profile();
     guest = REXCVAR_GET(signin_guests) && IsGuestXuid(static_cast<uint64_t>(xuids[0]));
-    assert_true(guest || static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
+    assert_true(guest || static_cast<uint64_t>(xuids[0]) == user_profile->xuid() ||
+                static_cast<uint64_t>(xuids[0]) == user_profile->signin_xuid());
     // TODO(gibbed): we assert here, but in case a title passes xuid_count > 1
     // until it's implemented for release builds...
     xuid_count = 1;
@@ -491,8 +519,13 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value) 
     }
   }
 
-  // If we deny everything, games should hopefully not try to do stuff.
-  *out_value = 0;
+  // If we deny everything, games should hopefully not try to do stuff. Online play: a profile
+  // signed in to Live has the privileges but those withheld (voice, buying content).
+  const bool granted =
+      REX_KERNEL_STATE()->user_profile()->online() && !IsPrivilegeWithheld(uint32_t(mask));
+  REXKRNL_NOISY_DEBUG("XamUserCheckPrivilege({}, {}) -> {}", uint32_t(user_index), uint32_t(mask),
+                granted);
+  *out_value = granted ? 1 : 0;
   return X_ERROR_SUCCESS;
 }
 
@@ -539,7 +572,8 @@ u32 XamUserGetMembershipTier_entry(u32 user_index) {
   if (user_index >= 4) {
     return X_ERROR_INVALID_PARAMETER;
   }
-  if (user_index) {
+  // A guest of a Gold profile signed in to Live (online play) plays online with it.
+  if (user_index && !(REX_KERNEL_STATE()->user_profile()->online() && xeXamIsGuestUser(user_index))) {
     return X_ERROR_NO_SUCH_USER;
   }
   return 6 /* 6 appears to be Gold */;

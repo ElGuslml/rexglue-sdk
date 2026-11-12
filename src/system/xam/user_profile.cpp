@@ -9,22 +9,57 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <cctype>
+#include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <utility>
 
 #include <fmt/format.h>
 
+#include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/system/flags.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
+
+REXCVAR_DEFINE_BOOL(online_play, false, "Online",
+                    "Online play between friends (experimental): the profile is signed in to Xbox "
+                    "Live with an online XUID of its own (kept in its folder, online_xuid.txt), has "
+                    "the multiplayer privileges and a network cable. Off: offline, as before");
+REXCVAR_DEFINE_STRING(online_xuid, "", "Online",
+                      "The online XUID to use instead of the profile's (16 hexadecimal digits), for "
+                      "two instances of a game on one PC with copies of one profile. Empty: the "
+                      "profile's");
 
 namespace rex {
 namespace system {
 namespace xam {
 
 namespace {
+
+// Online XUIDs on Xbox Live begin with 0009: the rest of the profile's is random.
+constexpr uint64_t kOnlineXuidPrefix = 0x0009000000000000ull;
+constexpr uint64_t kOnlineXuidPrefixMask = 0xFFFF000000000000ull;
+
+// An online XUID written as 16 hexadecimal digits (spaces around ignored); 0 if it is not one.
+uint64_t ParseOnlineXuid(std::string text) {
+  while (!text.empty() && std::isspace(uint8_t(text.back()))) {
+    text.pop_back();
+  }
+  size_t start = 0;
+  while (start < text.size() && std::isspace(uint8_t(text[start]))) {
+    ++start;
+  }
+  text = text.substr(start);
+  if (text.size() != 16 || text.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+    return 0;
+  }
+  uint64_t xuid = std::stoull(text, nullptr, 16);
+  return (xuid & kOnlineXuidPrefixMask) == kOnlineXuidPrefix && xuid != kOnlineXuidPrefix ? xuid : 0;
+}
 
 // A profile name for the game (profile_name): ASCII, as an Xbox 360 gamertag and as XamUserGetName
 // copies it, at most 15 characters. Latin letters with accents (U+00C0 to U+017F) lose them; other
@@ -237,6 +272,55 @@ void UserProfile::SaveSetting(UserProfile::Setting* setting) {
     // stored some other way.
     REXSYS_WARN("Attempting to save unsupported profile setting to disk");
   }
+}
+
+void UserProfile::InitializeOnline(const std::filesystem::path& folder) {
+  online_xuid_ = 0;
+  if (!REXCVAR_GET(online_play)) {
+    return;
+  }
+  uint64_t xuid = 0;
+  const std::string& chosen = REXCVAR_GET(online_xuid);
+  if (!chosen.empty()) {
+    xuid = ParseOnlineXuid(chosen);
+    if (!xuid) {
+      REXSYS_WARN("Online play: online_xuid \"{}\" is not an online XUID (16 hexadecimal digits "
+                  "beginning 0009); the profile's is used",
+                  chosen);
+    }
+  }
+  std::filesystem::path file = folder.empty() ? std::filesystem::path() : folder / "online_xuid.txt";
+  if (!xuid && !file.empty()) {
+    std::ifstream in(file);
+    std::string text;
+    if (in && std::getline(in, text)) {
+      xuid = ParseOnlineXuid(text);
+      if (!xuid) {
+        REXSYS_WARN("Online play: {} does not hold an online XUID; a new one is made",
+                    rex::path_to_utf8(file));
+      }
+    }
+  }
+  if (!xuid) {
+    // 48 random bits under the 0009 prefix: two friends' profiles never share one in practice.
+    std::random_device random;
+    do {
+      xuid = kOnlineXuidPrefix | ((uint64_t(random()) << 16 ^ uint64_t(random())) & 0xFFFFFFFFFFFFull);
+    } while (xuid == kOnlineXuidPrefix);
+    if (file.empty()) {
+      REXSYS_WARN("Online play: no profile folder; the online XUID {:016X} lasts this session only",
+                  xuid);
+    } else {
+      std::ofstream out(file, std::ios::trunc);
+      out << fmt::format("{:016X}\n", xuid);
+      if (!out) {
+        REXSYS_WARN("Online play: could not write {}; the online XUID {:016X} lasts this session only",
+                    rex::path_to_utf8(file), xuid);
+      }
+    }
+  }
+  online_xuid_ = xuid;
+  REXSYS_INFO("Online play: \"{}\" signed in to Xbox Live, online XUID {:016X}", name_, xuid);
 }
 
 }  // namespace xam

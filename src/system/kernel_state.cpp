@@ -79,6 +79,8 @@ KernelState::KernelState(Runtime* emulator)
     REXSYS_INFO("Profile \"{}\", folder {}", user_profile_->name(), rex::path_to_utf8(profile_root));
   }
   content_manager_ = std::make_unique<xam::ContentManager>(this, user_data_root, profile_root);
+  // Online play: the online XUID is the profile's (its folder), or this install's without one.
+  user_profile_->InitializeOnline(!profile_root.empty() ? profile_root : user_data_root);
 
   if (shared_kernel_state_ != nullptr) {
     REXSYS_ERROR("KernelState constructed but shared_kernel_state_ already set");

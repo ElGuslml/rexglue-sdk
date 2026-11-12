@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -221,10 +222,24 @@ class UserProfile {
 
   UserProfile();
 
+  // The offline XUID: the same in every profile, so the content folders (<root>/<XUID>/...) and a
+  // save bound to its owner's XUID are the same whichever profile plays.
   uint64_t xuid() const { return xuid_; }
+  // Online play (online_play): the profile signed in to Xbox Live with an online XUID of its own,
+  // kept in its folder; 0 when online play is off.
+  uint64_t online_xuid() const { return online_xuid_; }
+  bool online() const { return online_xuid_ != 0; }
+  // The XUID a game gets when it does not ask for the offline one: the online XUID when signed in to
+  // Live (XamUserGetSigninInfo without XUSER_GET_SIGNIN_INFO_OFFLINE_XUID_ONLY, XamUserGetXUID).
+  uint64_t signin_xuid() const { return online() ? online_xuid_ : xuid_; }
   std::string name() const { return name_; }
-  uint32_t signin_state() const { return 1; }
+  // 1: signed in locally; 2: signed in to Xbox Live (online play).
+  uint32_t signin_state() const { return online() ? 2 : 1; }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+
+  // Online play (online_play): reads the profile's online XUID from `folder` (online_xuid.txt), or
+  // makes one and writes it there; the online_xuid option takes its place. Off: nothing.
+  void InitializeOnline(const std::filesystem::path& folder);
 
   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
 
@@ -233,6 +248,7 @@ class UserProfile {
 
  private:
   uint64_t xuid_;
+  uint64_t online_xuid_ = 0;
   std::string name_;
   std::vector<std::unique_ptr<Setting>> setting_list_;
   std::unordered_map<uint32_t, Setting*> settings_;

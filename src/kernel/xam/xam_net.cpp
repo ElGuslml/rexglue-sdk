@@ -506,6 +506,12 @@ struct XEthernetStatus {
 };
 
 u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
+  // Online play: a cable in (a game may drop its online match without one: Guitar Hero: Metallica's
+  // per-frame check of a client or server). Offline: none, as before.
+  if (REX_KERNEL_STATE()->user_profile()->online()) {
+    return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE | XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+           XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
+  }
   return 0;
 }
 
