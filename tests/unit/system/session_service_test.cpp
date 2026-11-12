@@ -169,3 +169,75 @@ TEST_CASE("A friend in its own lobby is invited once to the host's party", "[onl
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
   CHECK(other.invites == 0);
 }
+
+TEST_CASE("The friends list, and an invite sent from it", "[online]") {
+  Player host(0x0009000000000301ull, "Host");
+  Player friend_(0x0009000000000302ull, "Friend");
+  host.net->Start({});
+  friend_.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return friend_.net->hub() == host.net->self(); }));
+
+  // The friend's prompt: answered at once, yes the first time, no after.
+  std::atomic<int> prompts = 0;
+  std::string inviter;
+  SessionService::SetInvitePrompt(
+      [&](const std::string& name, std::function<void(bool)> answer) {
+        inviter = name;
+        answer(prompts++ == 0);
+      });
+
+  // No party yet: nothing to invite to.
+  CHECK_FALSE(host.sessions->SendInvite(friend_.net->self()));
+  // Not connected: not sent.
+  CHECK_FALSE(host.sessions->SendInvite(0x0009000000000399ull));
+
+  SessionInfo party_info;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x1000, kParty, 0, 8, 0, &party_info, &nonce);
+  // The host in the friend's list, with its party.
+  REQUIRE(WaitFor([&] {
+    auto friends = friend_.sessions->Friends();
+    return friends.size() == 1 && friends[0].has_party;
+  }));
+  auto friends = friend_.sessions->Friends();
+  CHECK(friends[0].xuid == host.net->self());
+  CHECK(friends[0].name == "Host");
+  CHECK(friends[0].party.xnkid == party_info.xnkid);
+  // The friend has no party: listed without one.
+  auto host_friends = host.sessions->Friends();
+  REQUIRE(host_friends.size() == 1);
+  CHECK(host_friends[0].xuid == friend_.net->self());
+  CHECK(host_friends[0].name == "Friend");
+  CHECK_FALSE(host_friends[0].has_party);
+
+  // Accepted: the game's invite notification, the host's party as the accepted invite.
+  REQUIRE(host.sessions->SendInvite(friend_.net->self()));
+  REQUIRE(WaitFor([&] { return friend_.invites == 1; }));
+  CHECK(inviter == "Host");
+  auto invite = friend_.sessions->accepted_invite();
+  REQUIRE(invite);
+  CHECK(invite->inviter == host.net->self());
+  CHECK(invite->info.xnkid == party_info.xnkid);
+  XNADDR host_addr{};
+  host.net->GetTitleXnAddr(&host_addr);
+  CHECK(std::memcmp(&invite->info.host, &host_addr, sizeof(XNADDR)) == 0);
+
+  // Declined: nothing for the game.
+  REQUIRE(host.sessions->SendInvite(friend_.net->self()));
+  REQUIRE(WaitFor([&] { return prompts == 2; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  CHECK(friend_.invites == 1);
+
+  SessionService::SetInvitePrompt({});
+}
+
+TEST_CASE("A ranked session is made a player match", "[online]") {
+  Player host(0x0009000000000401ull, "Host");
+  host.net->Start({});
+  SessionInfo info;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x2000, kGame | SessionService::kUsesArbitration, 0, 2, 0, &info, &nonce);
+  auto details = host.sessions->Details(0x2000);
+  REQUIRE(details);
+  CHECK(details->flags == kGame);
+}

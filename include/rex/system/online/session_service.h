@@ -10,7 +10,11 @@
  * Invites: a game that joined a host by its address (online_host) is invited once to each party
  * the host opens (a session with presence and invites), when it is itself in its online lobby (a
  * party of its own): the game's own invite path then leaves its lobby and joins the host's, as when
- * a player accepts a friend's invite on the console.
+ * a player accepts a friend's invite on the console. An invite a player sends from the game's
+ * friends list (XInviteSend) reaches the friend's game, which asks its player (SetInvitePrompt) and
+ * joins the inviter's party if accepted.
+ *
+ * The friends list (XFriendsCreateEnumerator): the peers connected now, by their names.
  */
 
 #pragma once
@@ -79,6 +83,15 @@ struct LocalSession {
   std::vector<SessionMember> members;
 };
 
+// A friend for the game's friends list (XONLINE_FRIEND): a peer connected now.
+struct Friend {
+  uint64_t xuid = 0;
+  std::string name;
+  // The party it hosts, if any (the friend's joinable session).
+  bool has_party = false;
+  SessionInfo party;
+};
+
 // An accepted invite (XINVITE_INFO).
 struct AcceptedInvite {
   uint32_t user_index = 0;
@@ -139,6 +152,19 @@ class SessionService {
   // XInviteGetAcceptedInfo: the invite last accepted.
   std::optional<AcceptedInvite> accepted_invite() const;
 
+  // XFriendsCreateEnumerator: the peers connected now.
+  std::vector<Friend> Friends() const;
+  // XInviteSend: invites a connected peer (by its XUID) to the party this game is in (hosted or
+  // joined); false if the peer is not connected or there is no party.
+  bool SendInvite(uint64_t invitee);
+
+  // Asks the player about an invite received from a friend's game: called on the network thread
+  // with the inviter's name and the function to call with the answer (any thread, once). Set by
+  // the app (ReXApp: the overlay's invite prompt); none: invites are declined.
+  using InvitePrompt =
+      std::function<void(const std::string& inviter, std::function<void(bool accept)> answer)>;
+  static void SetInvitePrompt(InvitePrompt prompt);
+
   // Decoding of an advertisement (tests).
   static std::vector<AdvertisedSession> DecodeSessions(const uint8_t* data, size_t size,
                                                        uint64_t owner);
@@ -153,6 +179,7 @@ class SessionService {
   std::vector<uint8_t> EncodeSessions() const;
   void OnControl(uint64_t peer, const uint8_t* data, size_t size);
   void OnPeer(uint64_t peer, bool connected);
+  void OnInvite(uint64_t peer, const uint8_t* data, size_t size);
   // A joiner in its own lobby is invited to the hub's open party (the lock held); true: call
   // invite_ once the lock is released.
   bool MaybeInvite();

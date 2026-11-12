@@ -27,6 +27,8 @@
 #include <rex/ui/overlay/achievements_overlay.h>
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
+#include <rex/system/online/session_service.h>
+#include <rex/ui/overlay/invite_prompt.h>
 #include <rex/ui/overlay/quit_prompt.h>
 #include <rex/ui/overlay/settings_overlay.h>
 #include <rex/audio/audio_system.h>
@@ -371,6 +373,13 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
         gamepad = state.gamepad;
         return true;
       };
+      // Online play's invites from friends (rex/ui/overlay/invite_prompt.h): the same input, a dialog to join or
+      // ignore, which the session service asks for.
+      rex::ui::SetupInvitePrompt(imgui_drawer_.get(), &app_context(), quit_input);
+      rex::system::online::SessionService::SetInvitePrompt(
+          [](const std::string& inviter, std::function<void(bool)> answer) {
+            rex::ui::ShowInvitePrompt(inviter, std::move(answer));
+          });
       rex::ui::SetupQuitPrompt(imgui_drawer_.get(), &app_context(), std::move(quit_input), [this] {
         if (window_) {
           window_->RequestClose();

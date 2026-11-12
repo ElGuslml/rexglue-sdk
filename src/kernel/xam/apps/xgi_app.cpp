@@ -264,6 +264,15 @@ bool XgiApp::DispatchOnline(uint32_t message, uint32_t buffer_ptr, uint32_t,
       REXKRNL_INFO("XSessionSearchEx: {} found", count);
       return true;
     }
+    case 0x000B001A: {  // XSessionArbitrationRegister: no arbitration between friends, nobody registered
+      uint32_t results_size = u32(20);
+      uint32_t results_ptr = u32(24);
+      if (results_ptr && results_size >= 8) {
+        auto* results = memory_->TranslateVirtual<uint8_t*>(results_ptr);
+        std::memset(results, 0, 8);
+      }
+      return true;
+    }
     case 0x000B001D: {  // XSessionGetDetails
       uint32_t obj = u32(0);
       uint32_t details_size = u32(4);

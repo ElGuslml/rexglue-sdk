@@ -32,6 +32,7 @@ set(REXUI_OVERLAY_SOURCES
     overlay/dialog_draw.cpp
     overlay/overlay_language.cpp
     overlay/quit_prompt.cpp
+    overlay/invite_prompt.cpp
     overlay/settings_overlay.cpp
 )
 

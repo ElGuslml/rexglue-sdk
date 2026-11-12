@@ -21,6 +21,10 @@ namespace {
 constexpr uint8_t kChannel = 1;
 constexpr uint8_t kMessageSessions = 1;  // the sender's hosted sessions, all of them
 constexpr uint8_t kMessageRequest = 2;   // asks for the receiver's
+constexpr uint8_t kMessageInvite = 3;    // an invite to the sender's party: its info, the sender's name
+
+std::mutex invite_prompt_mutex;
+SessionService::InvitePrompt invite_prompt;
 
 void Put16(std::vector<uint8_t>& out, uint16_t v) {
   out.push_back(uint8_t(v));
@@ -114,6 +118,12 @@ void SessionService::SetProperty(uint32_t user_index, uint32_t id,
 void SessionService::Create(uint32_t obj, uint32_t flags, uint32_t user_index, uint32_t max_public,
                             uint32_t max_private, SessionInfo* info, uint64_t* nonce) {
   std::random_device random;
+  if (flags & kUsesArbitration) {
+    // Ranked matches are not offered between friends (there is no arbitration service): a ranked session is a
+    // player match.
+    REXSYS_WARN("online: session {:08X} asked for arbitration (ranked); made a player match", obj);
+    flags &= ~kUsesArbitration;
+  }
   LocalSession session;
   session.obj = obj;
   session.flags = flags;
@@ -492,6 +502,10 @@ void SessionService::OnControl(uint64_t peer, const uint8_t* data, size_t size) 
     Advertise(peer);
     return;
   }
+  if (data[0] == kMessageInvite) {
+    OnInvite(peer, data, size);
+    return;
+  }
   if (data[0] != kMessageSessions) {
     return;
   }
@@ -518,6 +532,114 @@ void SessionService::OnPeer(uint64_t peer, bool connected) {
   Advertise(peer);
   uint8_t request = kMessageRequest;
   net_->SendControl(peer, kChannel, &request, 1);
+}
+
+void SessionService::SetInvitePrompt(InvitePrompt prompt) {
+  std::lock_guard lock(invite_prompt_mutex);
+  invite_prompt = std::move(prompt);
+}
+
+std::vector<Friend> SessionService::Friends() const {
+  std::vector<Friend> friends;
+  std::vector<uint64_t> peers = net_->ConnectedPeers();
+  std::lock_guard lock(mutex_);
+  for (uint64_t peer : peers) {
+    Friend f;
+    f.xuid = peer;
+    f.name = net_->PeerName(peer);
+    auto remote = remote_.find(peer);
+    if (remote != remote_.end()) {
+      for (const AdvertisedSession& session : remote->second) {
+        if ((session.flags & kUsesPresence) && !(session.flags & kInvitesDisabled)) {
+          f.has_party = true;
+          f.party = session.info;
+          break;
+        }
+      }
+    }
+    friends.push_back(std::move(f));
+  }
+  return friends;
+}
+
+bool SessionService::SendInvite(uint64_t invitee) {
+  std::vector<uint8_t> message;
+  {
+    std::lock_guard lock(mutex_);
+    // The party this game is in: a session with presence and a peer network, hosted or joined.
+    const LocalSession* party = nullptr;
+    for (const auto& [obj, session] : sessions_) {
+      if ((session.flags & kUsesPresence) && (session.flags & kUsesPeerNetwork)) {
+        party = &session;
+        if (session.host) {
+          break;
+        }
+      }
+    }
+    if (!party) {
+      REXSYS_WARN("online: an invite to {:016X} with no party to invite to", invitee);
+      return false;
+    }
+    message.push_back(kMessageInvite);
+    message.insert(message.end(), party->info.xnkid.begin(), party->info.xnkid.end());
+    message.insert(message.end(), party->info.xnkey.begin(), party->info.xnkey.end());
+    auto* host = reinterpret_cast<const uint8_t*>(&party->info.host);
+    message.insert(message.end(), host, host + sizeof(XNADDR));
+    std::string name = self_name_.substr(0, 255);
+    message.push_back(uint8_t(name.size()));
+    message.insert(message.end(), name.begin(), name.end());
+  }
+  std::vector<uint64_t> peers = net_->ConnectedPeers();
+  if (std::find(peers.begin(), peers.end(), invitee) == peers.end()) {
+    REXSYS_WARN("online: an invite to {:016X}, who is not connected", invitee);
+    return false;
+  }
+  net_->SendControl(invitee, kChannel, message.data(), message.size());
+  REXSYS_INFO("online: invited \"{}\" ({:016X})", net_->PeerName(invitee), invitee);
+  return true;
+}
+
+void SessionService::OnInvite(uint64_t peer, const uint8_t* data, size_t size) {
+  Reader r{data, size, 1};
+  const uint8_t* kid = r.Bytes(kXnKidSize);
+  const uint8_t* key = r.Bytes(kXnKeySize);
+  const uint8_t* host = r.Bytes(sizeof(XNADDR));
+  uint8_t name_length = r.U8();
+  const uint8_t* name = r.Bytes(name_length);
+  if (!r.ok) {
+    return;
+  }
+  AcceptedInvite invite;
+  invite.user_index = 0;
+  invite.invitee = LocalUserXuid(0);
+  invite.inviter = peer;
+  std::memcpy(invite.info.xnkid.data(), kid, kXnKidSize);
+  std::memcpy(invite.info.xnkey.data(), key, kXnKeySize);
+  std::memcpy(&invite.info.host, host, sizeof(XNADDR));
+  std::string inviter(reinterpret_cast<const char*>(name), name_length);
+  InvitePrompt prompt;
+  {
+    std::lock_guard lock(invite_prompt_mutex);
+    prompt = invite_prompt;
+  }
+  REXSYS_INFO("online: \"{}\" ({:016X}) invites this game to its party", inviter, peer);
+  if (!prompt) {
+    REXSYS_INFO("online: no invite prompt: the invite is declined");
+    return;
+  }
+  prompt(inviter, [this, invite](bool accept) {
+    if (!accept) {
+      REXSYS_INFO("online: the invite from {:016X} declined", invite.inviter);
+      return;
+    }
+    {
+      std::lock_guard lock(mutex_);
+      accepted_invite_ = invite;
+      invited_.insert(invite.info.xnkid);
+    }
+    REXSYS_INFO("online: the invite from {:016X} accepted: the game joins its party", invite.inviter);
+    invite_(invite.user_index);
+  });
 }
 
 bool SessionService::MaybeInvite() {
