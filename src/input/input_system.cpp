@@ -56,7 +56,9 @@ REXCVAR_DEFINE_STRING(gamepad_device_subtypes, "", "Input",
                       "XINPUT_DEVSUBTYPE reported for particular gamepads, in place of gamepad_subtype: "
                       "controller=subtype entries separated by commas, a controller named by its serial "
                       "number or else its SDL GUID (as the log's OnControllerDeviceAdded lines give them; "
-                      "keyboard = the keyboard's emulated pad), 1 = gamepad. A launcher writes it");
+                      "keyboard = the keyboard's emulated pad), 1 = gamepad; subtype:flags adds capability "
+                      "flags (8:1 = a drum kit Guitar Hero's engine plays as a Rock Band kit, four lanes). A "
+                      "launcher writes it");
 REXCVAR_DEFINE_STRING(gamepad_tap_target, "", "Input",
                       "As mnk_tap_target, for a gamepad the game is told is a guitar (gamepad_subtype, "
                       "gamepad_device_subtypes): a control it also presses, briefly, when one of "
@@ -101,11 +103,18 @@ bool EqualsIgnoringCase(std::string_view a, std::string_view b) {
          });
 }
 
-// The subtype gamepad_device_subtypes gives a device, -1 when it does not name it. A serial number
-// tells two pads of one model apart, which share a GUID; a pad without one (XInput's) goes by its GUID.
-int32_t DeviceSubtypeSetting(const DeviceInfo& device) {
+// What gamepad_device_subtypes gives a device: a subtype (-1 when it does not name it) and, after a colon, capability
+// flags added to the driver's ("controller=8:1": a drum kit with flag 0x0001, which Guitar Hero: World Tour's engine
+// takes as a Rock Band kit, four lanes). A serial number tells two pads of one model apart, which share a GUID; a pad
+// without one (XInput's) goes by its GUID.
+struct DeviceKind {
+  int32_t subtype = -1;
+  uint16_t flags = 0;
+};
+
+DeviceKind DeviceKindSetting(const DeviceInfo& device) {
   const std::string& text = REXCVAR_GET(gamepad_device_subtypes);
-  int32_t by_guid = -1;
+  DeviceKind by_guid;
   size_t start = 0;
   while (start < text.size()) {
     size_t end = text.find(',', start);
@@ -119,26 +128,52 @@ int32_t DeviceSubtypeSetting(const DeviceInfo& device) {
       continue;
     }
     const std::string_view key = Trim(entry.substr(0, equals));
-    const std::string_view value = Trim(entry.substr(equals + 1));
-    int32_t subtype = -1;
-    if (std::from_chars(value.data(), value.data() + value.size(), subtype).ec != std::errc() ||
-        subtype < 0 || subtype > 0x13) {
+    std::string_view value = Trim(entry.substr(equals + 1));
+    DeviceKind kind;
+    const size_t colon = value.find(':');
+    if (colon != std::string_view::npos) {
+      std::string_view flags = Trim(value.substr(colon + 1));
+      value = Trim(value.substr(0, colon));
+      int base = 10;
+      if (flags.size() > 2 && flags[0] == '0' && (flags[1] == 'x' || flags[1] == 'X')) {
+        flags.remove_prefix(2);
+        base = 16;
+      }
+      uint32_t parsed = 0;
+      if (std::from_chars(flags.data(), flags.data() + flags.size(), parsed, base).ec != std::errc() ||
+          parsed > 0xFFFF) {
+        continue;
+      }
+      kind.flags = static_cast<uint16_t>(parsed);
+    }
+    if (std::from_chars(value.data(), value.data() + value.size(), kind.subtype).ec != std::errc() ||
+        kind.subtype < 0 || kind.subtype > 0x13) {
       continue;
     }
     if (device.synthetic) {
       if (EqualsIgnoringCase(key, "keyboard")) {
-        return subtype;
+        return kind;
       }
       continue;
     }
     if (!device.serial.empty() && EqualsIgnoringCase(key, device.serial)) {
-      return subtype;
+      return kind;
     }
     if (!device.guid.empty() && EqualsIgnoringCase(key, device.guid)) {
-      by_guid = subtype;
+      by_guid = kind;
     }
   }
   return by_guid;
+}
+
+int32_t DeviceSubtypeSetting(const DeviceInfo& device) {
+  return DeviceKindSetting(device).subtype;
+}
+
+// The capability flags a game is told for a device whose driver reports `flags`: those gamepad_device_subtypes adds,
+// for any device it names (a Rock Band drum kit's own, marked four-lane, too).
+uint16_t ReportedFlags(const DeviceInfo* device, uint16_t flags) {
+  return device ? static_cast<uint16_t>(flags | DeviceKindSetting(*device).flags) : flags;
 }
 
 // The subtype a game is told for a device whose driver reports `subtype` (GetCapabilities).
@@ -358,6 +393,7 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
     return result;
   }
   out_caps->sub_type = ReportedSubtype(DeviceInfoFor(chosen), out_caps->sub_type);
+  out_caps->flags = ReportedFlags(DeviceInfoFor(chosen), out_caps->flags);
   NoteToldKind(user_index, flags, chosen, out_caps->sub_type);
   return result;
 }
