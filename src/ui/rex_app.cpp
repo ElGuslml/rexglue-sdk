@@ -9,6 +9,7 @@
  *              See LICENSE file in the project root for full license text.
  */
 
+#include <rex/audio/downmix.h>
 #include <rex/rex_app.h>
 
 #include <cstdlib>
@@ -696,11 +697,13 @@ void ReXApp::OnDpiChanged(ui::UISetupEvent& e) {
 
 void ReXApp::OnGotFocus(ui::UISetupEvent& e) {
   (void)e;
+  rex::audio::SetWindowInBackground(false);  // audio_mute_unfocused
   OnWindowFocusChanged(true);
 }
 
 void ReXApp::OnLostFocus(ui::UISetupEvent& e) {
   (void)e;
+  rex::audio::SetWindowInBackground(true);
   OnWindowFocusChanged(false);
 }
 

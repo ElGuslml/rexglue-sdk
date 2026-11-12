@@ -10,6 +10,9 @@
  */
 #pragma once
 
+#include <cstddef>
+#include <string>
+
 namespace rex::audio {
 
 /**
@@ -59,7 +62,28 @@ SurroundMix GetSurroundMix();
 
 /// Linear master gain applied to the stereo fold and to 5.1 passthrough alike.
 /// 1.0 is unity. Above unity can clip, and the output stage clamps.
+/// GetOutputGain returns the title's gain times the player's volume
+/// (audio_volume), and 0 while the game's window is in the background with
+/// audio_mute_unfocused on.
 void SetOutputGain(float linear);
 float GetOutputGain();
+
+/// The player's choice of channels (audio_channels): kAuto passes the 5.1 render
+/// to a device of more than two channels and folds it for the others; kStereo
+/// folds it whatever the device; kMono folds it, then plays the same signal on
+/// both sides (one earphone, or one speaker).
+enum class OutputChannels { kAuto, kStereo, kMono };
+OutputChannels GetOutputChannels();
+
+/// The game's window lost or got the focus: with audio_mute_unfocused the output
+/// stage plays silence while it is in the background. Safe from any thread.
+void SetWindowInBackground(bool background);
+
+/// Interleaved stereo frames made mono: each frame's two samples their mean.
+void FoldStereoToMono(float* interleaved, size_t frames);
+
+/// The output device the player chose (audio_output_device), empty for the
+/// system's default one.
+std::string GetOutputDeviceName();
 
 }  // namespace rex::audio

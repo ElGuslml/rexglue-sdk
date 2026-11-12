@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <string>
 
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
@@ -62,14 +63,36 @@ bool SDLAudioDriver::Initialize() {
   }
   sdl_initialized_ = true;
 
+  // The player's output (audio_output_device): a playback device of that name, else Windows' default one, which SDL
+  // follows when it changes.
+  SDL_AudioDeviceID target = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+  const std::string wanted = GetOutputDeviceName();
+  if (!wanted.empty()) {
+    int count = 0;
+    SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count);
+    for (int i = 0; ids && i < count; ++i) {
+      const char* name = SDL_GetAudioDeviceName(ids[i]);
+      if (name && wanted == name) {
+        target = ids[i];
+        break;
+      }
+    }
+    SDL_free(ids);
+    if (target == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK) {
+      REXAPU_WARN("audio_output_device '{}' not found: the default output", wanted);
+    }
+  }
+  // audio_channels: stereo and mono fold the game's 5.1 whatever the device has.
+  const OutputChannels channels = GetOutputChannels();
+  mono_ = channels == OutputChannels::kMono;
+
   SDL_AudioSpec desired_spec = {};
   SDL_AudioSpec obtained_spec = {};
   desired_spec.freq = frame_frequency_;
   desired_spec.format = SDL_AUDIO_F32LE;
-  desired_spec.channels = frame_channels_;
-  sdl_device_channels_ = frame_channels_;
-  sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
-                                          SDLCallback, this);
+  desired_spec.channels = channels == OutputChannels::kAuto ? frame_channels_ : 2;
+  sdl_device_channels_ = uint8_t(desired_spec.channels);
+  sdl_stream_ = SDL_OpenAudioDeviceStream(target, &desired_spec, SDLCallback, this);
   if (!sdl_stream_) {
     REXAPU_ERROR("SDL_OpenAudioDeviceStream() failed: {}", SDL_GetError());
     return false;
@@ -88,13 +111,12 @@ bool SDLAudioDriver::Initialize() {
 
   // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
   // Handing it a 6ch stream instead would use SDL's own downmix.
-  if (obtained_spec.channels <= 2) {
+  if (obtained_spec.channels <= 2 && sdl_device_channels_ != 2) {
     SDL_DestroyAudioStream(sdl_stream_);
     sdl_stream_ = nullptr;
     desired_spec.channels = 2;
     sdl_device_channels_ = 2;
-    sdl_stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desired_spec,
-                                            SDLCallback, this);
+    sdl_stream_ = SDL_OpenAudioDeviceStream(target, &desired_spec, SDLCallback, this);
     if (!sdl_stream_) {
       REXAPU_ERROR("SDL_OpenAudioDeviceStream() stereo fallback failed: {}", SDL_GetError());
       return false;
@@ -110,9 +132,10 @@ bool SDLAudioDriver::Initialize() {
   // first thing worth knowing when a report says the balance is wrong on one
   // speaker setup and right on another.
   const char* device_name = SDL_GetAudioDeviceName(sdl_device);
-  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch",
+  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch{}{}",
               device_name ? device_name : "?", obtained_spec.channels, obtained_spec.freq,
-              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
+              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_),
+              mono_ ? " (mono)" : "", target == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK ? ", the default output" : "");
 
   if (!SDL_ResumeAudioDevice(sdl_device)) {
     REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
@@ -252,6 +275,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
           case 2:
             conversion::sequential_6_BE_to_interleaved_2_LE(data, buffer, channel_samples_, fold,
                                                             gain);
+            if (driver->mono_) {
+              FoldStereoToMono(data, channel_samples_);
+            }
             break;
           case 6:
             conversion::sequential_6_BE_to_interleaved_6_LE(data, buffer, channel_samples_, mix,

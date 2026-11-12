@@ -43,6 +43,7 @@ class SDLAudioDriver : public AudioDriver {
   SDL_AudioStream* sdl_stream_ = nullptr;
   bool sdl_initialized_ = false;
   uint8_t sdl_device_channels_ = 0;
+  bool mono_ = false;  // audio_channels = mono: the stereo fold played on both sides
 
   static const uint32_t frame_frequency_ = 48000;
   static const uint32_t frame_channels_ = 6;

@@ -307,18 +307,46 @@ void WasapiExclusiveDriver::Output::RenderThread(std::promise<bool> opened) {
     ComPtr<IMMDeviceEnumerator> enumerator;
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
     if (FAILED(hr)) return;
-    ComPtr<IMMDevice> endpoint;
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &endpoint);
-    if (FAILED(hr)) return;
-    ComPtr<IPropertyStore> properties;
-    if (SUCCEEDED(endpoint->OpenPropertyStore(STGM_READ, &properties))) {
-      PROPVARIANT name;
-      PropVariantInit(&name);
-      if (SUCCEEDED(properties->GetValue(kFriendlyName, &name)) && name.vt == VT_LPWSTR) {
-        device_name_ = ToUtf8(name.pwszVal);
+    // An endpoint's name as Windows shows it (SDL's devices have the same names).
+    auto friendly_name = [](IMMDevice* device) {
+      std::string text;
+      ComPtr<IPropertyStore> properties;
+      if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &properties))) {
+        PROPVARIANT name;
+        PropVariantInit(&name);
+        if (SUCCEEDED(properties->GetValue(kFriendlyName, &name)) && name.vt == VT_LPWSTR) {
+          text = ToUtf8(name.pwszVal);
+        }
+        PropVariantClear(&name);
       }
-      PropVariantClear(&name);
+      return text;
+    };
+    // The player's output (audio_output_device) among the active ones, else the default one.
+    ComPtr<IMMDevice> endpoint;
+    const std::string wanted = GetOutputDeviceName();
+    if (!wanted.empty()) {
+      ComPtr<IMMDeviceCollection> devices;
+      UINT count = 0;
+      if (SUCCEEDED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &devices)) &&
+          SUCCEEDED(devices->GetCount(&count))) {
+        for (UINT i = 0; i < count && !endpoint; ++i) {
+          ComPtr<IMMDevice> device;
+          if (SUCCEEDED(devices->Item(i, &device)) && friendly_name(device.Get()) == wanted) {
+            endpoint = device;
+          }
+        }
+      }
+      if (!endpoint) {
+        REXAPU_WARN("audio_output_device '{}' not found: the default output in exclusive mode", wanted);
+      }
     }
+    if (!endpoint) {
+      hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &endpoint);
+      if (FAILED(hr)) return;
+    } else {
+      step = "the chosen output device";
+    }
+    device_name_ = friendly_name(endpoint.Get());
     step = "exclusive mode";
     hr = endpoint->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &device.client);
     if (FAILED(hr)) return;
@@ -441,6 +469,9 @@ bool WasapiExclusiveDriver::NextFrame() {
   } else {
     conversion::sequential_6_BE_to_interleaved_2_LE(staging_, frame, kChannelSamples, GetStereoFold(),
                                                     GetOutputGain());
+    if (GetOutputChannels() == OutputChannels::kMono) {
+      FoldStereoToMono(staging_, kChannelSamples);
+    }
   }
   staging_read_ = 0;
   {
