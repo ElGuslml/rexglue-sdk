@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <utility>
 
@@ -350,6 +351,15 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     }
   }
 
+  // Every page of every range valid (the common case: a draw's vertex and index data, unchanged since it was uploaded):
+  // nothing to upload, and the global lock is not taken, the ranges not sorted. The valid bits are read without the
+  // lock: a page invalidated right after this check is as stale as one invalidated right after the lock is released,
+  // the GPU reading it later either way. With the lock, two requests per draw on the renderer's thread competed for it
+  // with the guest's kernel and the memory's write watches (NativeXRenderer in Kameo: 5.7 % of that thread).
+  if (host_gpu_memory_sparse_granularity_log2_ == UINT32_MAX && RangesValid(ranges, count)) {
+    return true;
+  }
+
   // Some texture or buffer is empty, for example - safe to draw in this case.
   std::vector<std::pair<uint32_t, uint32_t>>& merged_ranges = merged_ranges_;
   merged_ranges.clear();
@@ -474,6 +484,34 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
   }
 
   return UploadRanges(upload_ranges_);
+}
+
+bool SharedMemory::RangesValid(const std::pair<uint32_t, uint32_t>* ranges, size_t count) const {
+  for (size_t i = 0; i < count; ++i) {
+    uint32_t start = ranges[i].first, length = ranges[i].second;
+    if (!length) {
+      continue;
+    }
+    if (start > kBufferSize || (kBufferSize - start) < length) {
+      return false;
+    }
+    uint32_t page_first = start >> page_size_log2_;
+    uint32_t page_last = (start + length - 1) >> page_size_log2_;
+    for (uint32_t block = page_first >> 6; block <= page_last >> 6; ++block) {
+      uint64_t valid = std::atomic_ref<uint64_t>(const_cast<uint64_t&>(system_page_flags_valid_[block]))
+                           .load(std::memory_order_relaxed);
+      if (block == page_first >> 6) {
+        valid |= (uint64_t(1) << (page_first & 63)) - 1;
+      }
+      if (block == page_last >> 6 && (page_last & 63) != 63) {
+        valid |= ~((uint64_t(2) << (page_last & 63)) - 1);
+      }
+      if (~valid) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
