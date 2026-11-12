@@ -13,6 +13,8 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include <cstring>
 #include <string>
 
@@ -868,12 +870,33 @@ u32 XamWriteGamerTile_entry(u32 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u3
   return X_ERROR_SUCCESS;
 }
 
+// Online play: each session handle has an object of its own (a few bytes of guest memory), as the
+// XSession messages name a session by it; without online play every session shares one, as before.
+std::mutex session_handles_mutex;
+std::map<uint32_t, uint32_t> session_handles;
+uint32_t next_session_handle = 0xCAFE0001;
+
 u32 XamSessionCreateHandle_entry(mapped_u32 handle_ptr) {
+  if (REX_KERNEL_STATE()->user_profile()->online()) {
+    std::lock_guard lock(session_handles_mutex);
+    uint32_t handle = next_session_handle++;
+    session_handles[handle] = REX_KERNEL_MEMORY()->SystemHeapAlloc(16);
+    *handle_ptr = handle;
+    return X_ERROR_SUCCESS;
+  }
   *handle_ptr = 0xCAFEDEAD;
   return X_ERROR_SUCCESS;
 }
 
 u32 XamSessionRefObjByHandle_entry(u32 handle, mapped_u32 obj_ptr) {
+  {
+    std::lock_guard lock(session_handles_mutex);
+    auto it = session_handles.find(handle);
+    if (it != session_handles.end()) {
+      *obj_ptr = it->second;
+      return X_ERROR_SUCCESS;
+    }
+  }
   assert_true(handle == 0xCAFEDEAD);
   // TODO(PermaNull): Implement this properly,
   // For the time being returning 0xDEADF00D will prevent crashing.

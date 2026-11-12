@@ -10,7 +10,13 @@
  */
 
 #include <rex/kernel/xam/apps/xgi_app.h>
+
+#include <algorithm>
+#include <cstring>
+
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/online/session_service.h>
 #include <rex/thread.h>
 
 namespace rex {
@@ -23,11 +29,296 @@ using namespace rex::system;
 
 XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
 
+namespace {
+
+using online::AdvertisedSession;
+using online::SessionInfo;
+using online::SessionService;
+
+// XSESSION_INFO in guest memory: XNKID, the host's XNADDR, XNKEY (60 bytes).
+// XSESSION_SEARCHRESULT (92 bytes), XUSER_CONTEXT (8), XUSER_PROPERTY (24),
+// XSESSION_LOCAL_DETAILS (128), XSESSION_MEMBER (16).
+constexpr uint32_t kSearchResultSize = 92;
+constexpr uint32_t kContextSize = 8;
+constexpr uint32_t kPropertySize = 24;
+constexpr uint32_t kLocalDetailsSize = 128;
+constexpr uint32_t kMemberSize = 16;
+// XSESSION_STATE.
+constexpr uint32_t kStateLobby = 0;
+constexpr uint32_t kStateInGame = 2;
+
+void ReadSessionInfo(const uint8_t* p, SessionInfo* info) {
+  std::memcpy(info->xnkid.data(), p, online::kXnKidSize);
+  std::memcpy(&info->host, p + 8, sizeof(online::XNADDR));
+  std::memcpy(info->xnkey.data(), p + 44, online::kXnKeySize);
+}
+
+void WriteSessionInfo(uint8_t* p, const SessionInfo& info) {
+  std::memcpy(p, info.xnkid.data(), online::kXnKidSize);
+  std::memcpy(p + 8, &info.host, sizeof(online::XNADDR));
+  std::memcpy(p + 44, info.xnkey.data(), online::kXnKeySize);
+}
+
+// XSESSION_SEARCHRESULT_HEADER and the results, their contexts and properties after them, as many
+// as fit in the buffer.
+uint32_t WriteSearchResults(memory::Memory* memory, uint32_t results_ptr, uint32_t buffer_size,
+                            const std::vector<AdvertisedSession>& sessions) {
+  uint8_t* base = memory->TranslateVirtual<uint8_t*>(results_ptr);
+  uint32_t count = 0;
+  // The results first, then the variable data.
+  uint32_t data_at = 8 + kSearchResultSize * uint32_t(sessions.size());
+  for (const AdvertisedSession& session : sessions) {
+    uint32_t needed = uint32_t(session.contexts.size()) * kContextSize +
+                      uint32_t(session.properties.size()) * kPropertySize;
+    for (const auto& property : session.properties) {
+      needed += uint32_t(property.value.size() + 3) & ~3u;
+    }
+    if (data_at + needed > buffer_size) {
+      break;
+    }
+    uint8_t* result = base + 8 + kSearchResultSize * count;
+    std::memset(result, 0, kSearchResultSize);
+    WriteSessionInfo(result, session.info);
+    uint32_t open_public =
+        session.max_public > session.filled_public ? session.max_public - session.filled_public : 0;
+    uint32_t open_private = session.max_private > session.filled_private
+                                ? session.max_private - session.filled_private
+                                : 0;
+    memory::store_and_swap<uint32_t>(result + 60, open_public);
+    memory::store_and_swap<uint32_t>(result + 64, open_private);
+    memory::store_and_swap<uint32_t>(result + 68, session.filled_public);
+    memory::store_and_swap<uint32_t>(result + 72, session.filled_private);
+    memory::store_and_swap<uint32_t>(result + 76, uint32_t(session.properties.size()));
+    memory::store_and_swap<uint32_t>(result + 80, uint32_t(session.contexts.size()));
+    uint32_t properties_at = data_at;
+    uint32_t contexts_at = properties_at + uint32_t(session.properties.size()) * kPropertySize;
+    uint32_t values_at = contexts_at + uint32_t(session.contexts.size()) * kContextSize;
+    memory::store_and_swap<uint32_t>(result + 84, results_ptr + properties_at);
+    memory::store_and_swap<uint32_t>(result + 88, results_ptr + contexts_at);
+    for (size_t i = 0; i < session.contexts.size(); ++i) {
+      uint8_t* context = base + contexts_at + kContextSize * i;
+      memory::store_and_swap<uint32_t>(context, session.contexts[i].first);
+      memory::store_and_swap<uint32_t>(context + 4, session.contexts[i].second);
+    }
+    for (size_t i = 0; i < session.properties.size(); ++i) {
+      const auto& value = session.properties[i].value;
+      uint8_t* property = base + properties_at + kPropertySize * i;
+      std::memset(property, 0, kPropertySize);
+      uint32_t id = session.properties[i].id;
+      memory::store_and_swap<uint32_t>(property, id);
+      // XUSER_DATA: its type (the id's high nibble), then the value at +8.
+      uint8_t type = uint8_t(id >> 28);
+      property[8] = type;
+      if (type == 4 || type == 6) {
+        // A string or binary: its size and a pointer to it.
+        std::memcpy(base + values_at, value.data(), value.size());
+        memory::store_and_swap<uint32_t>(property + 16, uint32_t(value.size()));
+        memory::store_and_swap<uint32_t>(property + 20, results_ptr + values_at);
+        values_at += uint32_t(value.size() + 3) & ~3u;
+      } else {
+        // Big-endian as the guest gave it (4 or 8 bytes).
+        std::memcpy(property + 16, value.data(), std::min<size_t>(value.size(), 8));
+      }
+    }
+    data_at = values_at;
+    ++count;
+  }
+  memory::store_and_swap<uint32_t>(base + 0, count);
+  memory::store_and_swap<uint32_t>(base + 4, count ? results_ptr + 8 : 0);
+  return count;
+}
+
+std::vector<bool> ReadBools(memory::Memory* memory, uint32_t ptr, uint32_t count) {
+  std::vector<bool> values(count, false);
+  if (ptr) {
+    for (uint32_t i = 0; i < count; ++i) {
+      values[i] = memory::load_and_swap<uint32_t>(memory->TranslateVirtual(ptr + 4 * i)) != 0;
+    }
+  }
+  return values;
+}
+
+}  // namespace
+
+// Online play: the session messages kept by the session service, the guest's structures filled.
+// false: not one of them (the switch below answers as without online play).
+bool XgiApp::DispatchOnline(uint32_t message, uint32_t buffer_ptr, uint32_t,
+                            X_HRESULT* result) {
+  SessionService* sessions = kernel_state_->online_sessions();
+  if (!sessions) {
+    return false;
+  }
+  auto buffer = memory_->TranslateVirtual(buffer_ptr);
+  auto u32 = [&](uint32_t offset) { return memory::load_and_swap<uint32_t>(buffer + offset); };
+  *result = X_E_SUCCESS;
+  switch (message) {
+    case 0x000B0006: {  // XUserSetContextEx
+      sessions->SetContext(u32(0), u32(16), u32(20));
+      return false;  // logged below
+    }
+    case 0x000B0007: {  // XUserSetPropertyEx
+      uint32_t size = u32(20);
+      uint32_t value_ptr = u32(24);
+      std::vector<uint8_t> value;
+      if (value_ptr && size) {
+        auto* p = memory_->TranslateVirtual<uint8_t*>(value_ptr);
+        value.assign(p, p + size);
+      }
+      sessions->SetProperty(u32(0), u32(16), value);
+      return false;
+    }
+    case 0x000B0010: {  // XSessionCreate
+      uint32_t obj = u32(0);
+      uint32_t flags = u32(4);
+      uint32_t info_ptr = u32(20);
+      uint32_t nonce_ptr = u32(24);
+      SessionInfo info;
+      if (info_ptr) {
+        ReadSessionInfo(memory_->TranslateVirtual<uint8_t*>(info_ptr), &info);
+      }
+      uint64_t nonce = 0;
+      sessions->Create(obj, flags, u32(16), u32(8), u32(12), &info, &nonce);
+      if (info_ptr) {
+        WriteSessionInfo(memory_->TranslateVirtual<uint8_t*>(info_ptr), info);
+      }
+      if (nonce_ptr) {
+        memory::store_and_swap<uint64_t>(memory_->TranslateVirtual(nonce_ptr), nonce);
+      }
+      return true;
+    }
+    case 0x000B0011: {  // XSessionDelete
+      sessions->Delete(u32(0));
+      return true;
+    }
+    case 0x000B0012:    // XSessionJoinLocal / XSessionJoinRemote
+    case 0x000B0013: {  // XSessionLeaveLocal / XSessionLeaveRemote
+      uint32_t obj = u32(0);
+      uint32_t count = u32(4);
+      uint32_t xuids_ptr = u32(8);
+      uint32_t indices_ptr = u32(12);
+      uint32_t private_ptr = message == 0x000B0012 ? u32(16) : 0;
+      std::vector<bool> is_private = ReadBools(memory_, private_ptr, count);
+      if (xuids_ptr) {
+        std::vector<uint64_t> xuids(count);
+        for (uint32_t i = 0; i < count; ++i) {
+          xuids[i] = memory::load_and_swap<uint64_t>(memory_->TranslateVirtual(xuids_ptr + 8 * i));
+        }
+        if (message == 0x000B0012) {
+          sessions->JoinRemote(obj, xuids, is_private);
+        } else {
+          sessions->LeaveRemote(obj, xuids);
+        }
+      } else if (indices_ptr) {
+        std::vector<uint32_t> indices(count);
+        for (uint32_t i = 0; i < count; ++i) {
+          indices[i] =
+              memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(indices_ptr + 4 * i));
+        }
+        if (message == 0x000B0012) {
+          sessions->JoinLocal(obj, indices, is_private);
+        } else {
+          sessions->LeaveLocal(obj, indices);
+        }
+      }
+      return true;
+    }
+    case 0x000B0014: {  // XSessionStart
+      sessions->Start(u32(0));
+      return true;
+    }
+    case 0x000B0015: {  // XSessionEnd
+      sessions->End(u32(0));
+      return true;
+    }
+    case 0x000B0018: {  // XSessionModify
+      sessions->Modify(u32(0), u32(4), u32(8), u32(12));
+      return true;
+    }
+    case 0x000B001B: {  // XSessionSearchByID: user, XNKID, buffer size, results
+      std::array<uint8_t, online::kXnKidSize> xnkid{};
+      std::memcpy(xnkid.data(), buffer + 4, online::kXnKidSize);
+      uint32_t buffer_size = u32(12);
+      uint32_t results_ptr = u32(16);
+      std::vector<AdvertisedSession> found;
+      if (auto session = sessions->FindById(xnkid)) {
+        found.push_back(*session);
+      }
+      uint32_t count = results_ptr ? WriteSearchResults(memory_, results_ptr, buffer_size, found) : 0;
+      REXKRNL_INFO("XSessionSearchByID: {} found", count);
+      return true;
+    }
+    case 0x000B001C: {  // XSessionSearchEx
+      uint32_t num_results = u32(8);
+      uint16_t num_ctx = memory::load_and_swap<uint16_t>(buffer + 14);
+      uint32_t ctx_ptr = u32(20);
+      uint32_t buffer_size = u32(24);
+      uint32_t results_ptr = u32(28);
+      std::vector<std::pair<uint32_t, uint32_t>> contexts;
+      for (uint32_t i = 0; ctx_ptr && i < num_ctx; ++i) {
+        auto* context = memory_->TranslateVirtual<uint8_t*>(ctx_ptr + kContextSize * i);
+        contexts.push_back({memory::load_and_swap<uint32_t>(context),
+                            memory::load_and_swap<uint32_t>(context + 4)});
+      }
+      std::vector<AdvertisedSession> found = sessions->Search(contexts, num_results);
+      uint32_t count = results_ptr ? WriteSearchResults(memory_, results_ptr, buffer_size, found) : 0;
+      REXKRNL_INFO("XSessionSearchEx: {} found", count);
+      return true;
+    }
+    case 0x000B001D: {  // XSessionGetDetails
+      uint32_t obj = u32(0);
+      uint32_t details_size = u32(4);
+      uint32_t details_ptr = u32(8);
+      auto session = sessions->Details(obj);
+      if (!session || !details_ptr) {
+        return false;
+      }
+      auto* details = memory_->TranslateVirtual<uint8_t*>(details_ptr);
+      std::memset(details, 0, std::min(details_size, kLocalDetailsSize));
+      uint32_t members = uint32_t(session->members.size());
+      uint32_t returned =
+          details_size >= kLocalDetailsSize
+              ? std::min<uint32_t>(members, (details_size - kLocalDetailsSize) / kMemberSize)
+              : 0;
+      uint32_t filled_public = 0, filled_private = 0;
+      for (const auto& member : session->members) {
+        ++(member.is_private ? filled_private : filled_public);
+      }
+      memory::store_and_swap<uint32_t>(details + 0, session->host ? session->user_index : 0xFE);
+      memory::store_and_swap<uint32_t>(details + 12, session->flags);
+      memory::store_and_swap<uint32_t>(details + 16, session->max_public);
+      memory::store_and_swap<uint32_t>(details + 20, session->max_private);
+      memory::store_and_swap<uint32_t>(
+          details + 24, session->max_public > filled_public ? session->max_public - filled_public : 0);
+      memory::store_and_swap<uint32_t>(
+          details + 28,
+          session->max_private > filled_private ? session->max_private - filled_private : 0);
+      memory::store_and_swap<uint32_t>(details + 32, members);
+      memory::store_and_swap<uint32_t>(details + 36, returned);
+      memory::store_and_swap<uint32_t>(details + 40, session->started ? kStateInGame : kStateLobby);
+      memory::store_and_swap<uint64_t>(details + 48, session->nonce);
+      WriteSessionInfo(details + 56, session->info);
+      memory::store_and_swap<uint32_t>(details + 124, returned ? details_ptr + kLocalDetailsSize : 0);
+      for (uint32_t i = 0; i < returned; ++i) {
+        uint8_t* member = details + kLocalDetailsSize + kMemberSize * i;
+        memory::store_and_swap<uint64_t>(member, session->members[i].xuid);
+        memory::store_and_swap<uint32_t>(member + 8, session->members[i].user_index);
+        memory::store_and_swap<uint32_t>(member + 12, session->members[i].is_private ? 1 : 0);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 // http://mb.mirage.org/bugzilla/xliveless/main.c
 
 X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                       uint32_t buffer_length) {
   // NOTE: buffer_length may be zero or valid.
+  X_HRESULT online_result;
+  if (DispatchOnline(message, buffer_ptr, buffer_length, &online_result)) {
+    return online_result;
+  }
   auto buffer = memory_->TranslateVirtual(buffer_ptr);
   switch (message) {
     case 0x000B0006: {

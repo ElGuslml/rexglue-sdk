@@ -484,7 +484,8 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
                                     mapped_u32 in_addr) {
   if (auto* net = OnlineNet(); net && xn_addr && in_addr) {
     uint32_t ina = 0;
-    uint32_t result = net->XnAddrToInAddr(*xn_addr, &ina);
+    uint32_t result = net->XnAddrToInAddr(
+        *xn_addr, xid ? static_cast<const uint8_t*>(static_cast<void*>(xid)) : nullptr, &ina);
     if (result == 0) {
       *in_addr = ina;
     }
@@ -497,11 +498,8 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
 u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 in_addr, ppc_ptr_t<XNADDR> xn_addr,
                                     mapped_void xid) {
   if (auto* net = OnlineNet(); net && xn_addr) {
-    uint32_t result = net->InAddrToXnAddr(in_addr, xn_addr);
-    if (xid) {
-      std::memset(xid, 0, online::kXnKidSize);
-    }
-    return result;
+    return net->InAddrToXnAddr(in_addr, xn_addr,
+                               xid ? static_cast<uint8_t*>(static_cast<void*>(xid)) : nullptr);
   }
   return 1;
 }

@@ -5,7 +5,6 @@
 #include <rex/system/online/virtual_net.h>
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 
 #include <fmt/format.h>
@@ -99,10 +98,10 @@ uint64_t Mix(uint64_t x) {
   return x;
 }
 
-// A peer's virtual IN_ADDR: 10.x.y.z from its id (the same on every PC while it is free), never .0
-// or .255.
-uint32_t HashInAddr(uint64_t id, uint32_t salt) {
-  uint32_t host = uint32_t(Mix(id + salt * 0x9E3779B97F4A7C15ull)) & 0x00FFFFFF;
+// A virtual IN_ADDR: 10.x.y.z from a peer's id (and a session's key ID), the same on every PC while
+// it is free, never .0 or .255.
+uint32_t HashInAddr(uint64_t id, uint32_t salt, uint64_t key = 0) {
+  uint32_t host = uint32_t(Mix(id ^ Mix(key) + salt * 0x9E3779B97F4A7C15ull)) & 0x00FFFFFF;
   uint8_t last = uint8_t(host);
   if (last == 0 || last == 255) {
     host ^= 0x01;
@@ -155,13 +154,29 @@ std::string Endpoint::ToString() const {
 }
 
 Endpoint Endpoint::Parse(const std::string& text) {
-  unsigned a, b, c, d, port;
-  char tail;
-  if (std::sscanf(text.c_str(), "%u.%u.%u.%u:%u%c", &a, &b, &c, &d, &port, &tail) != 5 || a > 255 ||
-      b > 255 || c > 255 || d > 255 || port == 0 || port > 65535) {
+  // a.b.c.d:port, nothing else.
+  uint32_t parts[5] = {};
+  size_t part = 0;
+  bool digit = false;
+  for (char c : text) {
+    if (c >= '0' && c <= '9') {
+      parts[part] = parts[part] * 10 + uint32_t(c - '0');
+      if (parts[part] > 65535) {
+        return {};
+      }
+      digit = true;
+    } else if (digit && ((c == '.' && part < 3) || (c == ':' && part == 3))) {
+      ++part;
+      digit = false;
+    } else {
+      return {};
+    }
+  }
+  if (part != 4 || !digit || parts[0] > 255 || parts[1] > 255 || parts[2] > 255 || parts[3] > 255 ||
+      parts[4] == 0) {
     return {};
   }
-  return Udp(a << 24 | b << 16 | c << 8 | d, uint16_t(port));
+  return Udp(parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3], uint16_t(parts[4]));
 }
 
 VirtualNet::VirtualNet(uint64_t self, uint32_t title_id, std::unique_ptr<Transport> transport)
@@ -211,16 +226,34 @@ void VirtualNet::Run() {
     });
     Tick();
   }
+  RunCallbacks();
 }
 
-uint32_t VirtualNet::InAddrFor(uint64_t id) const {
+uint32_t VirtualNet::InAddrFor(uint64_t peer, const KeyId& xnkid) {
+  auto known = association_in_addrs_.find({peer, xnkid});
+  if (known != association_in_addrs_.end()) {
+    return known->second;
+  }
+  uint64_t key = 0;
+  for (uint8_t b : xnkid) {
+    key = key << 8 | b;
+  }
   for (uint32_t salt = 0;; ++salt) {
-    uint32_t in_addr = HashInAddr(id, salt);
-    auto it = in_addrs_.find(in_addr);
-    if (in_addr != self_in_addr_ && (it == in_addrs_.end() || it->second == id)) {
+    uint32_t in_addr = HashInAddr(peer, salt, key);
+    if (in_addr != self_in_addr_ && !in_addrs_.count(in_addr)) {
+      in_addrs_[in_addr] = {peer, xnkid};
+      association_in_addrs_[{peer, xnkid}] = in_addr;
+      REXSYS_DEBUG("online: peer {:016X} in session {} is {}.{}.{}.{} here", peer,
+                   Hex(xnkid.data(), xnkid.size()), in_addr >> 24, (in_addr >> 16) & 0xFF,
+                   (in_addr >> 8) & 0xFF, in_addr & 0xFF);
       return in_addr;
     }
   }
+}
+
+const VirtualNet::Association* VirtualNet::AssociationByInAddr(uint32_t in_addr) const {
+  auto it = in_addrs_.find(in_addr);
+  return it == in_addrs_.end() ? nullptr : &it->second;
 }
 
 VirtualNet::Peer& VirtualNet::PeerFor(uint64_t id) {
@@ -230,19 +263,7 @@ VirtualNet::Peer& VirtualNet::PeerFor(uint64_t id) {
   }
   Peer& peer = peers_[id];
   peer.id = id;
-  peer.in_addr = InAddrFor(id);
-  in_addrs_[peer.in_addr] = id;
-  REXSYS_DEBUG("online: peer {:016X} is {}.{}.{}.{} here", id, peer.in_addr >> 24,
-               (peer.in_addr >> 16) & 0xFF, (peer.in_addr >> 8) & 0xFF, peer.in_addr & 0xFF);
   return peer;
-}
-
-VirtualNet::Peer* VirtualNet::PeerByInAddr(uint32_t in_addr) {
-  auto it = in_addrs_.find(in_addr);
-  if (it == in_addrs_.end()) {
-    return nullptr;
-  }
-  return &peers_[it->second];
 }
 
 void VirtualNet::SendFrameTo(const Endpoint& to, uint64_t dst, FrameType type,
@@ -320,38 +341,57 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
     peer.endpoint = from;
   }
   peer.heard = now;
-  if (peer.status != kConnectConnected) {
+  if (peer.status != kConnectConnected && type != FrameType::kBye) {
     REXSYS_INFO("online: peer {:016X} connected{}", src,
                 (flags & kFlagForwarded) ? " (through the hub)" : "");
-    peer.status = kConnectConnected;
+    SetStatus(peer, kConnectConnected);
   }
 
   switch (type) {
-    case FrameType::kHello: {
+    case FrameType::kHello:
+    case FrameType::kHelloAck: {
       uint32_t protocol = r.U32();
       uint32_t title = r.U32();
+      uint8_t name_length = r.U8();
+      const uint8_t* name = r.Bytes(name_length);
       if (!r.ok || title != title_id_) {
         REXSYS_WARN("online: {} ({:016X}) plays title {:08X}, not this game; refused",
                     from.ToString(), src, title);
         SendFrameTo(from, src, FrameType::kBye, nullptr, 0);
-        peer.status = kConnectLost;
+        SetStatus(peer, kConnectLost);
         return;
       }
-      REXSYS_INFO("online: peer {:016X} joined from {} (protocol {})", src, from.ToString(),
-                  protocol);
-      std::vector<uint8_t> payload;
-      Put32(payload, kProtocolVersion);
-      Put32(payload, title_id_);
-      SendFrameTo(from, src, FrameType::kHelloAck, payload.data(), payload.size());
-      break;
-    }
-    case FrameType::kHelloAck:
-      if (from == hub_endpoint_ && hub_ != src) {
+      peer.name.assign(reinterpret_cast<const char*>(name), name_length);
+      if (type == FrameType::kHello) {
+        REXSYS_INFO("online: \"{}\" ({:016X}) joined from {} (protocol {})", peer.name, src,
+                    from.ToString(), protocol);
+        std::vector<uint8_t> payload = HelloPayload();
+        SendFrameTo(from, src, FrameType::kHelloAck, payload.data(), payload.size());
+      } else if (from == hub_endpoint_ && hub_ != src) {
         hub_ = src;
-        REXSYS_INFO("online: joined the host {:016X} at {}", src, from.ToString());
+        REXSYS_INFO("online: joined \"{}\" ({:016X}), the host, at {}", peer.name, src,
+                    from.ToString());
       }
       break;
+    }
+    case FrameType::kControl: {
+      uint8_t channel = r.U8();
+      if (!r.ok) {
+        return;
+      }
+      auto it = control_handlers_.find(channel);
+      if (it != control_handlers_.end()) {
+        auto handler = it->second;
+        std::vector<uint8_t> message(data + r.at, data + size);
+        pending_callbacks_.push_back([handler, src, message] {
+          handler(src, message.data(), message.size());
+        });
+      }
+      break;
+    }
     case FrameType::kData: {
+      // The session's key ID, the ports, the datagram.
+      const uint8_t* kid = r.Bytes(kXnKidSize);
       uint16_t src_port = r.U16();
       uint16_t dst_port = r.U16();
       if (!r.ok) {
@@ -362,7 +402,9 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
         ++frames_dropped_;
         return;
       }
-      it->second->Deliver(peer.in_addr, src_port, data + r.at, r.Left());
+      KeyId xnkid;
+      std::memcpy(xnkid.data(), kid, kXnKidSize);
+      it->second->Deliver(InAddrFor(src, xnkid), src_port, data + r.at, r.Left());
       break;
     }
     case FrameType::kPing:
@@ -383,8 +425,12 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
       Put32(payload, seq);
       Put64(payload, t0);
       auto it = qos_listen_.find(xnkid);
-      // 0: not listening for that session; 1: listening; 2: listening disabled.
-      uint8_t state = it == qos_listen_.end() ? 0 : it->second.enabled ? 1 : 2;
+      // 0: an unknown session; 1: listening; 2: listening disabled; 3: the session's key registered
+      // without listening, answered by XNet itself (a console answers a party's host so: Guitar
+      // Hero: Metallica's party never listens, and a friend joining it needs the host contacted).
+      uint8_t state = it != qos_listen_.end() ? (it->second.enabled ? 1 : 2)
+                      : keys_.count(xnkid)    ? 3
+                                              : 0;
       payload.push_back(state);
       const std::vector<uint8_t> empty;
       const auto& listen_data = state == 1 ? it->second.data : empty;
@@ -426,7 +472,7 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
     }
     case FrameType::kBye:
       REXSYS_INFO("online: peer {:016X} left", src);
-      peer.status = kConnectLost;
+      SetStatus(peer, kConnectLost);
       peer.endpoint = {};
       if (src == hub_) {
         hub_ = 0;
@@ -463,27 +509,59 @@ void VirtualNet::FinishQosTarget(QosLookupState& lookup, size_t index) {
   REXSYS_DEBUG("online: QoS of {:016X}: flags {:02X}, {} of {} probes, rtt {} ms", target.peer,
                result.flags, result.probes_recv, result.probes_xmit, result.rtt_min_ms);
   auto done = lookup.done;
-  // Called after the lock is released (Tick).
-  pending_qos_.push_back([done, index, result] { done(index, result); });
+  // Called after the lock is released (RunCallbacks).
+  pending_callbacks_.push_back([done, index, result] { done(index, result); });
+}
+
+void VirtualNet::SetStatus(Peer& peer, uint32_t status) {
+  if (peer.status == status) {
+    return;
+  }
+  bool was_connected = peer.status == kConnectConnected;
+  peer.status = status;
+  if (peer_handler_ && (status == kConnectConnected) != was_connected) {
+    auto handler = peer_handler_;
+    uint64_t id = peer.id;
+    bool connected = status == kConnectConnected;
+    pending_callbacks_.push_back([handler, id, connected] { handler(id, connected); });
+  }
+}
+
+std::vector<uint8_t> VirtualNet::HelloPayload() const {
+  std::vector<uint8_t> payload;
+  Put32(payload, kProtocolVersion);
+  Put32(payload, title_id_);
+  std::string name = self_name_.substr(0, 255);
+  payload.push_back(uint8_t(name.size()));
+  payload.insert(payload.end(), name.begin(), name.end());
+  return payload;
+}
+
+void VirtualNet::RunCallbacks() {
+  std::vector<std::function<void()>> callbacks;
+  {
+    std::lock_guard lock(mutex_);
+    callbacks.swap(pending_callbacks_);
+  }
+  for (auto& callback : callbacks) {
+    callback();
+  }
 }
 
 void VirtualNet::Tick() {
   const auto now = Clock::now();
-  std::vector<std::function<void()>> callbacks;
   {
     std::lock_guard lock(mutex_);
     if (hub_endpoint_.valid() && hub_ == 0 && now - hello_sent_ >= kHelloInterval) {
       hello_sent_ = now;
-      std::vector<uint8_t> payload;
-      Put32(payload, kProtocolVersion);
-      Put32(payload, title_id_);
+      std::vector<uint8_t> payload = HelloPayload();
       SendFrameTo(hub_endpoint_, 0, FrameType::kHello, payload.data(), payload.size());
     }
     for (auto& [id, peer] : peers_) {
       if (peer.status == kConnectPending) {
         if (now - peer.connect_started >= kConnectTimeout) {
           REXSYS_WARN("online: peer {:016X} did not answer; connection lost", id);
-          peer.status = kConnectLost;
+          SetStatus(peer, kConnectLost);
         } else if (now - peer.pinged >= kConnectPing) {
           peer.pinged = now;
           std::vector<uint8_t> payload;
@@ -494,7 +572,11 @@ void VirtualNet::Tick() {
         if (now - peer.heard >= kLostAfter) {
           REXSYS_WARN("online: nothing from peer {:016X} for {} s; connection lost", id,
                       std::chrono::duration_cast<std::chrono::seconds>(kLostAfter).count());
-          peer.status = kConnectLost;
+          SetStatus(peer, kConnectLost);
+          if (id == hub_) {
+            // Hello again until it answers.
+            hub_ = 0;
+          }
         } else if (now - peer.pinged >= kKeepAlive) {
           peer.pinged = now;
           std::vector<uint8_t> payload;
@@ -534,18 +616,15 @@ void VirtualNet::Tick() {
                                             [](const QosTarget& t) { return t.done; });
                                       }),
                        qos_lookups_.end());
-    callbacks.swap(pending_qos_);
   }
-  for (auto& callback : callbacks) {
-    callback();
-  }
+  RunCallbacks();
 }
 
 void VirtualNet::GetTitleXnAddr(XNADDR* addr) const {
   MakeXnAddr(self_, self_in_addr_, addr);
 }
 
-uint32_t VirtualNet::XnAddrToInAddr(const XNADDR& addr, uint32_t* in_addr) {
+uint32_t VirtualNet::XnAddrToInAddr(const XNADDR& addr, const uint8_t* xnkid, uint32_t* in_addr) {
   uint64_t id = XnAddrPeer(addr);
   if (!id) {
     return kWsaEinval;
@@ -554,26 +633,38 @@ uint32_t VirtualNet::XnAddrToInAddr(const XNADDR& addr, uint32_t* in_addr) {
     *in_addr = self_in_addr_;
     return 0;
   }
+  KeyId key{};
+  if (xnkid) {
+    std::memcpy(key.data(), xnkid, kXnKidSize);
+  }
   std::lock_guard lock(mutex_);
-  *in_addr = PeerFor(id).in_addr;
+  PeerFor(id);
+  *in_addr = InAddrFor(id, key);
   return 0;
 }
 
-uint32_t VirtualNet::InAddrToXnAddr(uint32_t in_addr, XNADDR* addr) {
+uint32_t VirtualNet::InAddrToXnAddr(uint32_t in_addr, XNADDR* addr, uint8_t* xnkid) {
   if (in_addr == self_in_addr_) {
     MakeXnAddr(self_, self_in_addr_, addr);
+    if (xnkid) {
+      std::memset(xnkid, 0, kXnKidSize);
+    }
     return 0;
   }
   std::lock_guard lock(mutex_);
-  Peer* peer = PeerByInAddr(in_addr);
-  if (!peer) {
+  const Association* association = AssociationByInAddr(in_addr);
+  if (!association) {
     return kWsaEinval;
   }
-  MakeXnAddr(peer->id, peer->in_addr, addr);
+  // The XNADDR names the peer, whatever the session: its address as its own XNADDR says.
+  MakeXnAddr(association->peer, HashInAddr(association->peer, 0), addr);
+  if (xnkid) {
+    std::memcpy(xnkid, association->xnkid.data(), kXnKidSize);
+  }
   return 0;
 }
 
-uint32_t VirtualNet::UnregisterInAddr(uint32_t in_addr) {
+uint32_t VirtualNet::UnregisterInAddr(uint32_t) {
   // The peer stays known (its frames keep arriving while the game plays with it).
   return 0;
 }
@@ -583,10 +674,11 @@ uint32_t VirtualNet::Connect(uint32_t in_addr) {
     return 0;
   }
   std::lock_guard lock(mutex_);
-  Peer* peer = PeerByInAddr(in_addr);
-  if (!peer) {
+  const Association* association = AssociationByInAddr(in_addr);
+  if (!association) {
     return kWsaEinval;
   }
+  Peer* peer = &PeerFor(association->peer);
   if (peer->status != kConnectConnected) {
     peer->status = kConnectPending;
     peer->connect_started = Clock::now();
@@ -600,8 +692,12 @@ uint32_t VirtualNet::GetConnectStatus(uint32_t in_addr) {
     return kConnectConnected;
   }
   std::lock_guard lock(mutex_);
-  Peer* peer = PeerByInAddr(in_addr);
-  return peer ? peer->status : kConnectIdle;
+  const Association* association = AssociationByInAddr(in_addr);
+  if (!association) {
+    return kConnectIdle;
+  }
+  auto peer = peers_.find(association->peer);
+  return peer != peers_.end() ? peer->second.status : kConnectIdle;
 }
 
 uint32_t VirtualNet::RegisterKey(const uint8_t* xnkid, const uint8_t* xnkey) {
@@ -715,17 +811,18 @@ int VirtualNet::SendTo(uint16_t src_port, uint32_t dst_in_addr, uint16_t dst_por
     }
     return int(size);
   }
-  Peer* peer = PeerByInAddr(dst_in_addr);
-  if (!peer) {
+  const Association* association = AssociationByInAddr(dst_in_addr);
+  if (!association) {
     ++frames_dropped_;
     return -1;
   }
   std::vector<uint8_t> payload;
-  payload.reserve(4 + size);
+  payload.reserve(kXnKidSize + 4 + size);
+  payload.insert(payload.end(), association->xnkid.begin(), association->xnkid.end());
   Put16(payload, src_port);
   Put16(payload, dst_port);
   payload.insert(payload.end(), data, data + size);
-  SendFrame(peer->id, FrameType::kData, payload.data(), payload.size());
+  SendFrame(association->peer, FrameType::kData, payload.data(), payload.size());
   return int(size);
 }
 
@@ -738,6 +835,52 @@ bool VirtualNet::KnowsPeer(uint64_t peer) const {
 uint64_t VirtualNet::hub() const {
   std::lock_guard lock(mutex_);
   return hub_;
+}
+
+Endpoint VirtualNet::hub_endpoint() const {
+  std::lock_guard lock(mutex_);
+  return hub_endpoint_;
+}
+
+void VirtualNet::SetSelfName(const std::string& name) {
+  std::lock_guard lock(mutex_);
+  self_name_ = name;
+}
+
+std::string VirtualNet::PeerName(uint64_t peer) const {
+  std::lock_guard lock(mutex_);
+  auto it = peers_.find(peer);
+  return it != peers_.end() ? it->second.name : std::string();
+}
+
+std::vector<uint64_t> VirtualNet::ConnectedPeers() const {
+  std::lock_guard lock(mutex_);
+  std::vector<uint64_t> peers;
+  for (const auto& [id, peer] : peers_) {
+    if (peer.status == kConnectConnected) {
+      peers.push_back(id);
+    }
+  }
+  return peers;
+}
+
+void VirtualNet::SetControlHandler(uint8_t channel, ControlHandler handler) {
+  std::lock_guard lock(mutex_);
+  control_handlers_[channel] = std::move(handler);
+}
+
+void VirtualNet::SendControl(uint64_t peer, uint8_t channel, const uint8_t* data, size_t size) {
+  std::vector<uint8_t> payload;
+  payload.reserve(1 + size);
+  payload.push_back(channel);
+  payload.insert(payload.end(), data, data + size);
+  std::lock_guard lock(mutex_);
+  SendFrame(peer, FrameType::kControl, payload.data(), payload.size());
+}
+
+void VirtualNet::SetPeerHandler(PeerHandler handler) {
+  std::lock_guard lock(mutex_);
+  peer_handler_ = std::move(handler);
 }
 
 }  // namespace rex::system::online

@@ -24,6 +24,10 @@ class XgiApp : public system::xam::App {
 
   X_HRESULT DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                 uint32_t buffer_length) override;
+
+ private:
+  bool DispatchOnline(uint32_t message, uint32_t buffer_ptr, uint32_t buffer_length,
+                      X_HRESULT* result);
 };
 
 }  // namespace apps

@@ -35,6 +35,7 @@
 #include <rex/system/xam/app_manager.h>
 #include <rex/system/xam/content_manager.h>
 #include <rex/system/xam/user_profile.h>
+#include <rex/system/online/session_service.h>
 #include <rex/system/online/virtual_net.h>
 #include <rex/platform/dynlib.h>
 #include <rex/system/function_dispatcher.h>
@@ -204,6 +205,8 @@ class KernelState {
   // Online play (online_play): the virtual network under XNet, made on first use (the title is
   // known by then); null when online play is off or its port could not be opened.
   online::VirtualNet* online_net();
+  // Online play: the sessions between friends over that network (null without it).
+  online::SessionService* online_sessions();
 
   // Access must be guarded by the global critical region.
   util::ObjectTable* object_table() { return &object_table_; }
@@ -360,6 +363,7 @@ class KernelState {
   std::unique_ptr<xam::UserProfile> user_profile_;
   std::once_flag online_net_once_;
   std::unique_ptr<online::VirtualNet> online_net_;
+  std::unique_ptr<online::SessionService> online_sessions_;
 
   rex::thread::global_critical_region global_critical_region_;
 

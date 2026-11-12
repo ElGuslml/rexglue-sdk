@@ -10,7 +10,12 @@
  */
 
 #include <rex/kernel/xam/apps/xlivebase_app.h>
+
+#include <cstring>
+
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/online/session_service.h>
 #include <rex/thread.h>
 
 namespace rex {
@@ -60,11 +65,49 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message, uint32_t buffer_pt
       return X_E_FAIL;
     }
     case 0x00058023: {
-      REXKRNL_DEBUG(
-          "CXLiveMessaging::XMessageGameInviteGetAcceptedInfo({:08X}, {:08X}) "
-          "unimplemented",
-          buffer_ptr, buffer_length);
-      return X_E_FAIL;
+      // XInviteGetAcceptedInfo through XMsgInProcessCall: the second argument is the call's
+      // argument list (16 bytes each, the value big-endian at +8): a pointer to the user index,
+      // then the XINVITE_INFO to fill (Guitar Hero: Metallica's sub_8254E648).
+      auto* sessions = kernel_state_->online_sessions();
+      auto invite = sessions ? sessions->accepted_invite() : std::nullopt;
+      if (!invite || !buffer_length) {
+        REXKRNL_DEBUG(
+            "CXLiveMessaging::XMessageGameInviteGetAcceptedInfo({:08X}, {:08X}): no invite",
+            buffer_ptr, buffer_length);
+        return X_E_FAIL;
+      }
+      auto* args = memory_->TranslateVirtual<uint8_t*>(buffer_length);
+      uint32_t user_arg = uint32_t(memory::load_and_swap<uint64_t>(args + 8));
+      uint32_t user_index =
+          user_arg < 4 ? user_arg
+                       : memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(user_arg));
+      uint32_t info_ptr = uint32_t(memory::load_and_swap<uint64_t>(args + 24));
+      if (!info_ptr || user_index != invite->user_index) {
+        REXKRNL_WARN("XInviteGetAcceptedInfo: user {} (the invite is user {}'s), info {:08X}",
+                     user_index, invite->user_index, info_ptr);
+        return X_E_FAIL;
+      }
+      // XINVITE_INFO: invitee, inviter, title, the host's XSESSION_INFO, from a game invite.
+      auto* info = memory_->TranslateVirtual<uint8_t*>(info_ptr);
+      std::memset(info, 0, 84);
+      memory::store_and_swap<uint64_t>(info + 0, invite->invitee);
+      memory::store_and_swap<uint64_t>(info + 8, invite->inviter);
+      memory::store_and_swap<uint32_t>(info + 16, kernel_state_->title_id());
+      std::memcpy(info + 20, invite->info.xnkid.data(), online::kXnKidSize);
+      std::memcpy(info + 28, &invite->info.host, sizeof(online::XNADDR));
+      std::memcpy(info + 64, invite->info.xnkey.data(), online::kXnKeySize);
+      memory::store_and_swap<uint32_t>(info + 80, 1);
+      REXKRNL_INFO("XInviteGetAcceptedInfo({}): the invite from {:016X}", user_index,
+                   invite->inviter);
+      return X_E_SUCCESS;
+    }
+    case 0x0005800E: {
+      // XUserMuteListQuery: {user index, XUID at +8, the answer at +16}; nobody is muted. A game
+      // asks it for every remote talker each frame (Guitar Hero: Metallica's sub_8254FF00).
+      if (buffer_ptr) {
+        memory::store_and_swap<uint32_t>(buffer + 16, 0);
+      }
+      return X_E_SUCCESS;
     }
     case 0x00058046: {
       // Required to be successful for 4D530910 to detect signed-in profile

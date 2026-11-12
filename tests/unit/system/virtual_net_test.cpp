@@ -82,7 +82,7 @@ TEST_CASE("A peer's XNADDR becomes its IN_ADDR and back", "[online]") {
   XNADDR own{};
   a.net->GetTitleXnAddr(&own);
   uint32_t in_addr = 0;
-  REQUIRE(a.net->XnAddrToInAddr(own, &in_addr) == 0);
+  REQUIRE(a.net->XnAddrToInAddr(own, nullptr, &in_addr) == 0);
   CHECK(in_addr == a.net->self_in_addr());
   CHECK((in_addr >> 24) == 10);
 
@@ -91,15 +91,15 @@ TEST_CASE("A peer's XNADDR becomes its IN_ADDR and back", "[online]") {
   XNADDR other{};
   b.net->GetTitleXnAddr(&other);
   uint32_t other_in_addr = 0;
-  REQUIRE(a.net->XnAddrToInAddr(other, &other_in_addr) == 0);
+  REQUIRE(a.net->XnAddrToInAddr(other, nullptr, &other_in_addr) == 0);
   CHECK(other_in_addr != in_addr);
   XNADDR back{};
-  REQUIRE(a.net->InAddrToXnAddr(other_in_addr, &back) == 0);
+  REQUIRE(a.net->InAddrToXnAddr(other_in_addr, &back, nullptr) == 0);
   CHECK(std::memcmp(back.abOnline, other.abOnline, sizeof(back.abOnline)) == 0);
 
   // Not one of ours.
   XNADDR zero{};
-  CHECK(a.net->XnAddrToInAddr(zero, &in_addr) != 0);
+  CHECK(a.net->XnAddrToInAddr(zero, nullptr, &in_addr) != 0);
 }
 
 TEST_CASE("Datagrams reach a peer's virtual port, also through the hub", "[online]") {
@@ -130,23 +130,23 @@ TEST_CASE("Datagrams reach a peer's virtual port, also through the hub", "[onlin
 
   // B to the host.
   uint32_t host_in_b = 0;
-  REQUIRE(b.net->XnAddrToInAddr(host_addr, &host_in_b) == 0);
+  REQUIRE(b.net->XnAddrToInAddr(host_addr, nullptr, &host_in_b) == 0);
   const uint8_t game_data[] = {0x00, 0x03, 'G', 'H', '!'};
   CHECK(b.net->SendTo(1000, host_in_b, 1000, game_data, sizeof(game_data)) == sizeof(game_data));
   REQUIRE(WaitFor([&] { return host_socket.count() == 1; }));
   uint32_t b_in_host = 0;
-  REQUIRE(host.net->XnAddrToInAddr(b_addr, &b_in_host) == 0);
+  REQUIRE(host.net->XnAddrToInAddr(b_addr, nullptr, &b_in_host) == 0);
   CHECK(host_socket.received[0].src_in_addr == b_in_host);
   CHECK(host_socket.received[0].src_port == 1000);
   CHECK(host_socket.received[0].data == std::vector<uint8_t>(game_data, game_data + 5));
 
   // B to C: neither knows where the other is; the host forwards.
   uint32_t c_in_b = 0;
-  REQUIRE(b.net->XnAddrToInAddr(c_addr, &c_in_b) == 0);
+  REQUIRE(b.net->XnAddrToInAddr(c_addr, nullptr, &c_in_b) == 0);
   CHECK(b.net->SendTo(1000, c_in_b, 1000, game_data, sizeof(game_data)) == sizeof(game_data));
   REQUIRE(WaitFor([&] { return c_socket.count() == 1; }));
   uint32_t b_in_c = 0;
-  REQUIRE(c.net->XnAddrToInAddr(b_addr, &b_in_c) == 0);
+  REQUIRE(c.net->XnAddrToInAddr(b_addr, nullptr, &b_in_c) == 0);
   CHECK(c_socket.received[0].src_in_addr == b_in_c);
 
   // A connection to C from B, through the hub.
@@ -165,6 +165,46 @@ TEST_CASE("Datagrams reach a peer's virtual port, also through the hub", "[onlin
   port = 1000;
   CHECK(host.net->Bind(&second, &port));
   c.net->Stop();
+  b.net->Stop();
+  host.net->Stop();
+}
+
+TEST_CASE("A peer in two sessions is two addresses, as XNet's security associations", "[online]") {
+  TestPeer host(0x0009000000000031ull);
+  TestPeer b(0x0009000000000032ull);
+  host.net->Start({});
+  b.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return b.net->hub() == host.net->self(); }));
+  FakeSocket host_socket;
+  uint16_t port = 1000;
+  REQUIRE(host.net->Bind(&host_socket, &port));
+
+  XNADDR host_addr{}, b_addr{};
+  host.net->GetTitleXnAddr(&host_addr);
+  b.net->GetTitleXnAddr(&b_addr);
+  const uint8_t party[kXnKidSize] = {0x81, 1, 1, 1, 1, 1, 1, 1};
+  const uint8_t match[kXnKidSize] = {0x82, 2, 2, 2, 2, 2, 2, 2};
+  uint32_t party_in_b = 0, match_in_b = 0;
+  REQUIRE(b.net->XnAddrToInAddr(host_addr, party, &party_in_b) == 0);
+  REQUIRE(b.net->XnAddrToInAddr(host_addr, match, &match_in_b) == 0);
+  CHECK(party_in_b != match_in_b);
+  uint8_t kid[kXnKidSize] = {};
+  XNADDR back{};
+  REQUIRE(b.net->InAddrToXnAddr(match_in_b, &back, kid) == 0);
+  CHECK(std::memcmp(kid, match, kXnKidSize) == 0);
+  CHECK(std::memcmp(back.abOnline, host_addr.abOnline, sizeof(back.abOnline)) == 0);
+
+  // A datagram in each session: two sources at the host, its own addresses for B in each.
+  const uint8_t data[] = {0, 1, 'x'};
+  CHECK(b.net->SendTo(1000, party_in_b, 1000, data, sizeof(data)) == sizeof(data));
+  CHECK(b.net->SendTo(1000, match_in_b, 1000, data, sizeof(data)) == sizeof(data));
+  REQUIRE(WaitFor([&] { return host_socket.count() == 2; }));
+  uint32_t b_party_in_host = 0, b_match_in_host = 0;
+  REQUIRE(host.net->XnAddrToInAddr(b_addr, party, &b_party_in_host) == 0);
+  REQUIRE(host.net->XnAddrToInAddr(b_addr, match, &b_match_in_host) == 0);
+  CHECK(host_socket.received[0].src_in_addr == b_party_in_host);
+  CHECK(host_socket.received[1].src_in_addr == b_match_in_host);
+  CHECK(b_party_in_host != b_match_in_host);
   b.net->Stop();
   host.net->Stop();
 }
@@ -208,6 +248,21 @@ TEST_CASE("A QoS lookup gets the target's listen data and round trip", "[online]
       CHECK(result.flags == kQosComplete);
     }
   }
+
+  // A session's key registered without listening (a party): contacted, no data.
+  std::array<uint8_t, kXnKidSize> party_kid = {0x80, 7, 7, 7, 7, 7, 7, 7};
+  const uint8_t party_key[kXnKeySize] = {};
+  host.net->RegisterKey(party_kid.data(), party_key);
+  results.clear();
+  b.net->QosLookup({{host_addr, party_kid}}, 1, [&](size_t index, const QosResult& result) {
+    std::lock_guard lock(mutex);
+    results.push_back({index, result});
+  });
+  REQUIRE(WaitFor([&] {
+    std::lock_guard lock(mutex);
+    return results.size() == 1;
+  }));
+  CHECK(results[0].second.flags == (kQosComplete | kQosTargetContacted));
 
   // Listening turned off: the target answers as disabled.
   host.net->QosListen(kid.data(), nullptr, 0, kQosListenDisable);

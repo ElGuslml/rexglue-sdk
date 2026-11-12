@@ -2,9 +2,11 @@
  * ReXGlue online play: the virtual network under XNet (online_play).
  *
  * Every game process in an online match is a peer, known by its id: its profile's online XUID.
- * A peer's XNADDR carries that id (abOnline: "RXNP" and the id), never a real address; each process
- * gives every peer it knows a virtual IN_ADDR (10.x.y.z) of its own, as XNetXnAddrToInAddr's
- * secure addresses. The game's datagram sockets are virtual: a socket bound to a port receives what
+ * A peer's XNADDR carries that id (abOnline: "RXNP" and the id), never a real address. As XNet's
+ * secure addresses, an IN_ADDR stands for a peer and a session's key ID together (a security
+ * association): each process gives every (peer, XNKID) pair it meets a virtual IN_ADDR (10.x.y.z) of
+ * its own, and every datagram carries its key ID, so a game that talks to one host in two sessions
+ * (Guitar Hero: Metallica's party and match, both on port 1000) sees two connections. The game's datagram sockets are virtual: a socket bound to a port receives what
  * peers send to that port, and sendto() to a peer's IN_ADDR reaches it through one transport (a
  * real UDP port, or later Steam): frames between peers, with the game's datagram unchanged inside.
  *
@@ -79,7 +81,7 @@ struct QosResult {
 class VirtualNet {
  public:
   // Frames carried by the transport; peers of other builds are refused by version.
-  static constexpr uint32_t kProtocolVersion = 1;
+  static constexpr uint32_t kProtocolVersion = 2;
   // A game datagram's largest size (VDP: 2-byte length + data + voice; Guitar Hero: 1200).
   static constexpr size_t kMaxDatagram = 1264;
   // The port an XNADDR reports (wPortOnline); not a real port.
@@ -99,9 +101,10 @@ class VirtualNet {
 
   // XNet.
   void GetTitleXnAddr(XNADDR* addr) const;
-  // 0, or a WSA error (WSAEINVAL: not one of our XNADDRs).
-  uint32_t XnAddrToInAddr(const XNADDR& addr, uint32_t* in_addr);
-  uint32_t InAddrToXnAddr(uint32_t in_addr, XNADDR* addr);
+  // 0, or a WSA error (WSAEINVAL: not one of our XNADDRs). xnkid: the session's key ID (null: none).
+  uint32_t XnAddrToInAddr(const XNADDR& addr, const uint8_t* xnkid, uint32_t* in_addr);
+  // The peer's XNADDR and the association's key ID (xnkid may be null).
+  uint32_t InAddrToXnAddr(uint32_t in_addr, XNADDR* addr, uint8_t* xnkid);
   uint32_t UnregisterInAddr(uint32_t in_addr);
   uint32_t Connect(uint32_t in_addr);
   uint32_t GetConnectStatus(uint32_t in_addr);
@@ -124,6 +127,23 @@ class VirtualNet {
   // Whether a peer has been heard from (tests, logs).
   bool KnowsPeer(uint64_t peer) const;
   uint64_t hub() const;
+  // The hub this game joins (online_host), invalid when it hosts.
+  Endpoint hub_endpoint() const;
+
+  // The player's name, sent in the hello (a peer's is known once it said hello).
+  void SetSelfName(const std::string& name);
+  std::string PeerName(uint64_t peer) const;
+  // The peers connected now.
+  std::vector<uint64_t> ConnectedPeers() const;
+
+  // Control messages of the services above the network (the sessions), on numbered channels;
+  // handlers and the peer handler are called on the network thread, outside the network's lock.
+  using ControlHandler = std::function<void(uint64_t peer, const uint8_t* data, size_t size)>;
+  void SetControlHandler(uint8_t channel, ControlHandler handler);
+  void SendControl(uint64_t peer, uint8_t channel, const uint8_t* data, size_t size);
+  // A peer connected (true: it said hello or answered) or was lost (false).
+  using PeerHandler = std::function<void(uint64_t peer, bool connected)>;
+  void SetPeerHandler(PeerHandler handler);
 
  private:
   enum class FrameType : uint8_t {
@@ -135,17 +155,18 @@ class VirtualNet {
     kQosProbe = 6,
     kQosReply = 7,
     kBye = 8,
+    kControl = 9,
   };
   using Clock = std::chrono::steady_clock;
 
   struct Peer {
     uint64_t id = 0;
-    uint32_t in_addr = 0;
     Endpoint endpoint;  // known when it sent us a frame itself (not forwarded)
     uint32_t status = kConnectIdle;
     Clock::time_point heard{};
     Clock::time_point connect_started{};
     Clock::time_point pinged{};
+    std::string name;
   };
   struct QosListenEntry {
     bool enabled = false;
@@ -157,7 +178,8 @@ class VirtualNet {
     uint32_t sent = 0;
     std::vector<uint32_t> rtts;
     bool answered = false;
-    // The target's answer: 0 not listening for that session, 1 listening, 2 listening disabled.
+    // The target's answer: 0 an unknown session, 1 listening, 2 listening disabled, 3 the key
+    // registered without listening.
     uint8_t listening = 0;
     std::vector<uint8_t> data;
     bool done = false;
@@ -177,10 +199,20 @@ class VirtualNet {
   void SendFrame(uint64_t to, FrameType type, const uint8_t* payload, size_t size);
   void SendFrameTo(const Endpoint& to, uint64_t dst, FrameType type, const uint8_t* payload,
                    size_t size);
+  using KeyId = std::array<uint8_t, kXnKidSize>;
+  // A security association: a peer in a session.
+  struct Association {
+    uint64_t peer = 0;
+    KeyId xnkid{};
+  };
   Peer& PeerFor(uint64_t id);
-  Peer* PeerByInAddr(uint32_t in_addr);
-  uint32_t InAddrFor(uint64_t id) const;
+  // The association's IN_ADDR here, made the first time.
+  uint32_t InAddrFor(uint64_t peer, const KeyId& xnkid);
+  const Association* AssociationByInAddr(uint32_t in_addr) const;
   void FinishQosTarget(QosLookupState& lookup, size_t index);
+  void SetStatus(Peer& peer, uint32_t status);
+  std::vector<uint8_t> HelloPayload() const;
+  void RunCallbacks();
 
   const uint64_t self_;
   const uint32_t title_id_;
@@ -194,13 +226,17 @@ class VirtualNet {
   uint64_t hub_ = 0;
   Clock::time_point hello_sent_{};
   std::map<uint64_t, Peer> peers_;
-  std::map<uint32_t, uint64_t> in_addrs_;
+  std::map<uint32_t, Association> in_addrs_;
+  std::map<std::pair<uint64_t, KeyId>, uint32_t> association_in_addrs_;
   std::map<uint16_t, PacketSink*> sockets_;
   std::map<std::array<uint8_t, kXnKidSize>, std::array<uint8_t, kXnKeySize>> keys_;
   std::map<std::array<uint8_t, kXnKidSize>, QosListenEntry> qos_listen_;
   std::vector<QosLookupState> qos_lookups_;
-  // QoS results to report once the lock is released.
-  std::vector<std::function<void()>> pending_qos_;
+  // Callbacks to run once the lock is released (QoS results, control messages, peer events).
+  std::vector<std::function<void()>> pending_callbacks_;
+  std::string self_name_;
+  std::map<uint8_t, ControlHandler> control_handlers_;
+  PeerHandler peer_handler_;
   uint32_t next_qos_id_ = 1;
   uint16_t next_port_ = 49152;
   uint32_t ping_seq_ = 0;

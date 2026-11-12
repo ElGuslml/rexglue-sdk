@@ -37,6 +37,7 @@ set(REXSYSTEM_SOURCES
     # Online play (online_play)
     online/virtual_net.cpp
     online/udp_transport.cpp
+    online/session_service.cpp
 
     ppc_types.cpp
     elf_module.cpp

@@ -171,6 +171,7 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
 KernelState::~KernelState() {
   app_manager_.reset();
   online_net_.reset();
+  online_sessions_.reset();
 
   // Stop the dispatch thread before touching the object table
   if (dispatch_thread_running_) {
@@ -256,6 +257,11 @@ online::VirtualNet* KernelState::online_net() {
     }
     online_net_ = std::make_unique<online::VirtualNet>(user_profile_->online_xuid(), title_id(),
                                                        std::move(transport));
+    online_net_->SetSelfName(user_profile_->name());
+    // An invite accepted: XN_LIVE_INVITE_ACCEPTED for the user, as the console's guide sends it.
+    online_sessions_ = std::make_unique<online::SessionService>(
+        online_net_.get(), user_profile_->online_xuid(), user_profile_->name(),
+        [this](uint32_t user_index) { BroadcastNotification(0x02000002, user_index); });
     online_net_->Start(hub);
     uint32_t ip = online_net_->self_in_addr();
     REXSYS_INFO("Online play: UDP port {}, {}; this game is {}.{}.{}.{} to its friends", port,
@@ -263,6 +269,11 @@ online::VirtualNet* KernelState::online_net() {
                 (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
   });
   return online_net_.get();
+}
+
+online::SessionService* KernelState::online_sessions() {
+  online_net();
+  return online_sessions_.get();
 }
 
 uint32_t KernelState::title_id() const {
