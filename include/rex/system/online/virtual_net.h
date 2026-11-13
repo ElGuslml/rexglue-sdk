@@ -34,13 +34,17 @@
 
 namespace rex::system::online {
 
-// Where a transport sends a frame: an IPv4 address and port (UDP: ip << 16 | port).
+// Where a transport sends a frame: an IPv4 address and port (UDP: ip << 16 | port, 48 bits), or a
+// Steam user (its Steam ID; an account's has bits above the 48th set: steam_bridge.h).
 struct Endpoint {
   uint64_t value = 0;
   bool valid() const { return value != 0; }
   bool operator==(const Endpoint& other) const { return value == other.value; }
   bool operator<(const Endpoint& other) const { return value < other.value; }
   static Endpoint Udp(uint32_t ipv4, uint16_t port) { return {uint64_t(ipv4) << 16 | port}; }
+  static Endpoint Steam(uint64_t steam_id) { return {steam_id}; }
+  bool steam() const { return (value >> 48) != 0; }
+  uint64_t steam_id() const { return value; }
   uint32_t ipv4() const { return uint32_t(value >> 16); }
   uint16_t port() const { return uint16_t(value); }
   std::string ToString() const;
@@ -95,6 +99,9 @@ class VirtualNet {
   // Starts the network thread; hub: the peer to join (online_host), or none to be one.
   void Start(const Endpoint& hub);
   void Stop();
+  // Another hub (a Steam lobby joined, or its owner changed), or none to be one: the peers of the
+  // old group are told goodbye and lost; the new hub is greeted.
+  void SetHub(const Endpoint& hub);
 
   uint64_t self() const { return self_; }
   uint32_t self_in_addr() const { return self_in_addr_; }

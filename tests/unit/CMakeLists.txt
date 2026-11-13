@@ -18,6 +18,7 @@ add_executable(unit_tests
     system/function_dispatcher_test.cpp
     system/virtual_net_test.cpp
     system/session_service_test.cpp
+    system/steam_bridge_test.cpp
     input/input_assignment_test.cpp
     input/mnk_binds_test.cpp
     codegen/codegen_writer_test.cpp
@@ -39,6 +40,7 @@ target_include_directories(unit_tests PRIVATE
 target_link_libraries(unit_tests PRIVATE
     rexcodegen
     rexruntime
+    rexsteam_core
     Catch2::Catch2WithMain
 )
 

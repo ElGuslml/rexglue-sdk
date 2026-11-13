@@ -14,12 +14,16 @@
  * friends list (XInviteSend) reaches the friend's game, which asks its player (SetInvitePrompt) and
  * joins the inviter's party if accepted.
  *
- * The friends list (XFriendsCreateEnumerator): the peers connected now, by their names.
+ * The friends list (XFriendsCreateEnumerator): the peers connected now, by their names, and the
+ * friends known elsewhere (Steam: steam_bridge.h), invited through it when not connected; such an
+ * invite accepted connects this game to the inviter's group first, then the game is told once the
+ * party is known.
  */
 
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -165,6 +169,19 @@ class SessionService {
       std::function<void(const std::string& inviter, std::function<void(bool accept)> answer)>;
   static void SetInvitePrompt(InvitePrompt prompt);
 
+  // Friends known outside the virtual network (Steam): listed with the connected peers, and
+  // invited through it when not connected (`invite` gets the invite to carry; false: not one).
+  struct ExternalFriends {
+    std::function<std::vector<Friend>()> list;
+    std::function<bool(uint64_t xuid, const std::vector<uint8_t>& invite)> invite;
+  };
+  void SetExternalFriends(ExternalFriends friends);
+  // An invite carried outside the virtual network (what `invite` above got): asked about; accepted,
+  // `join` connects this game to the inviter's group, and the game is told once the party is known
+  // (a peer advertises it), within kPendingInviteTimeout.
+  void OnExternalInvite(const uint8_t* data, size_t size, std::function<void()> join);
+  static constexpr auto kPendingInviteTimeout = std::chrono::seconds(30);
+
   // Decoding of an advertisement (tests).
   static std::vector<AdvertisedSession> DecodeSessions(const uint8_t* data, size_t size,
                                                        uint64_t owner);
@@ -180,6 +197,14 @@ class SessionService {
   void OnControl(uint64_t peer, const uint8_t* data, size_t size);
   void OnPeer(uint64_t peer, bool connected);
   void OnInvite(uint64_t peer, const uint8_t* data, size_t size);
+  // An invite message (kMessageInvite): the party and the inviter's name.
+  static bool ParseInvite(const uint8_t* data, size_t size, SessionInfo* party, std::string* name);
+  // Asks the player; accepted: `accepted` (outside the lock).
+  void AskAboutInvite(const std::string& inviter, AcceptedInvite invite,
+                      std::function<void(const AcceptedInvite&)> accepted);
+  bool KnowsSession(const std::array<uint8_t, kXnKidSize>& xnkid) const;
+  // The pending invite's party advertised (the lock held): true to tell the game.
+  bool MaybeAcceptPending();
   // A joiner in its own lobby is invited to the hub's open party (the lock held); true: call
   // invite_ once the lock is released.
   bool MaybeInvite();
@@ -197,6 +222,11 @@ class SessionService {
   std::map<uint64_t, std::vector<AdvertisedSession>> remote_;  // by the peer that hosts them
   std::set<std::array<uint8_t, kXnKidSize>> invited_;
   std::optional<AcceptedInvite> accepted_invite_;
+  // An invite accepted whose party is not known yet (an external invite: this game is joining the
+  // inviter's group).
+  std::optional<AcceptedInvite> pending_invite_;
+  std::chrono::steady_clock::time_point pending_since_{};
+  ExternalFriends external_;
 };
 
 }  // namespace rex::system::online

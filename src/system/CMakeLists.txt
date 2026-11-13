@@ -38,6 +38,7 @@ set(REXSYSTEM_SOURCES
     online/virtual_net.cpp
     online/udp_transport.cpp
     online/session_service.cpp
+    online/steam_bridge.cpp
 
     ppc_types.cpp
     elf_module.cpp
@@ -131,4 +132,23 @@ if(REXGLUE_USE_VULKAN)
         spirv-tools-headers
     )
     target_compile_definitions(rexruntime PUBLIC REX_HAS_VULKAN=1)
+endif()
+
+# The Steam helper (online play through Steam, rex/system/online/steam_link.h): a small process of
+# its own, so that Steam (as app 480) never takes the game's controllers or hooks its renderer. It
+# loads steam_api64.dll at run time; the Steamworks SDK is not needed to build it.
+set(REXGLUE_STEAM_API_DLL "" CACHE FILEPATH
+    "Steam's steam_api64.dll (the Steamworks SDK's redistributable_bin/win64) to put next to the game")
+add_library(rexsteam_core STATIC online/steam_helper/helper.cpp)
+target_include_directories(rexsteam_core PUBLIC
+    $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/online/steam_helper>)
+target_compile_features(rexsteam_core PUBLIC cxx_std_20)
+if(WIN32)
+    target_link_libraries(rexsteam_core PUBLIC ws2_32)
+    add_executable(rexsteam
+        online/steam_helper/main.cpp
+        online/steam_helper/steam_backend.cpp)
+    target_link_libraries(rexsteam PRIVATE rexsteam_core winmm)
+    rexglue_add_version_resource(rexsteam DESCRIPTION "ReXGlue Steam helper")
 endif()

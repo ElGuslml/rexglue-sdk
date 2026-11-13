@@ -35,6 +35,11 @@ REXCVAR_DEFINE_UINT32(online_port, 3074, "Online",
 REXCVAR_DEFINE_STRING(online_host, "", "Online",
                       "Online play: the friend whose game to join, as address:port (a direct "
                       "connection); empty: this PC's game is the host its friends join");
+REXCVAR_DEFINE_BOOL(online_steam, false, "Online",
+                    "Online play through Steam (Steam running and signed in): the Steam friends "
+                    "running this game in its friends list, invites, and Valve's relays, so no port "
+                    "is opened. Steam runs in rexsteam.exe, next to the game, as app 480 "
+                    "(Spacewar), which Steam shows to the friends");
 REXCVAR_DEFINE_STRING(online_xuid, "", "Online",
                       "The online XUID to use instead of the profile's (16 hexadecimal digits), for "
                       "two instances of a game on one PC with copies of one profile. Empty: the "

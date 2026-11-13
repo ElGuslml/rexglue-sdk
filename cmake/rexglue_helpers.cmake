@@ -167,6 +167,17 @@ function(rexglue_configure_target target_name)
         unset(_plugin_target)
     endforeach()
 
+    # The Steam helper (online play through Steam, rex/system/online/steam_link.h) and, when
+    # REXGLUE_STEAM_API_DLL names it, Steam's steam_api64.dll (the Steamworks SDK's
+    # redistributable), next to the host. The helper runs only with online_steam on.
+    if(WIN32 AND TARGET rexsteam)
+        add_dependencies(${target_name} rexsteam)
+        list(APPEND _rexglue_staged_plugins $<TARGET_FILE:rexsteam>)
+        if(REXGLUE_STEAM_API_DLL AND EXISTS "${REXGLUE_STEAM_API_DLL}")
+            list(APPEND _rexglue_staged_plugins "${REXGLUE_STEAM_API_DLL}")
+        endif()
+    endif()
+
     if(WIN32)
         # The POST_BUILD copies run only when the host links again. A change to the SDK alone
         # builds new DLLs without that: the GPU plugins are not linked at all, and rexruntime's

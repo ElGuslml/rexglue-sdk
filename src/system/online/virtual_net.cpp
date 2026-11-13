@@ -148,6 +148,9 @@ std::string Hex(const uint8_t* data, size_t size) {
 }  // namespace
 
 std::string Endpoint::ToString() const {
+  if (steam()) {
+    return fmt::format("Steam user {}", steam_id());
+  }
   uint32_t ip = ipv4();
   return fmt::format("{}.{}.{}.{}:{}", ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
                      port());
@@ -217,6 +220,25 @@ void VirtualNet::Stop() {
   if (thread_.joinable()) {
     thread_.join();
   }
+}
+
+void VirtualNet::SetHub(const Endpoint& hub) {
+  std::lock_guard lock(mutex_);
+  if (hub == hub_endpoint_) {
+    return;
+  }
+  for (auto& [id, peer] : peers_) {
+    if (peer.endpoint.valid()) {
+      SendFrameTo(peer.endpoint, id, FrameType::kBye, nullptr, 0);
+    }
+    peer.endpoint = {};
+    SetStatus(peer, kConnectLost);
+  }
+  REXSYS_INFO("online: {}", hub.valid() ? "joining " + hub.ToString()
+                                         : std::string("hosting (the friends join this game)"));
+  hub_endpoint_ = hub;
+  hub_ = 0;
+  hello_sent_ = {};
 }
 
 void VirtualNet::Run() {

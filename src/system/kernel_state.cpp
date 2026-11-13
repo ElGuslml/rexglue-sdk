@@ -170,6 +170,7 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
 
 KernelState::~KernelState() {
   app_manager_.reset();
+  online_steam_ = nullptr;  // the network's transport
   online_net_.reset();
   online_sessions_.reset();
 
@@ -248,12 +249,18 @@ online::VirtualNet* KernelState::online_net() {
         REXSYS_ERROR("Online play: online_host \"{}\" is not address:port", host);
       }
     }
-    auto transport =
+    std::unique_ptr<online::Transport> transport =
         online::CreateUdpTransport(static_cast<uint16_t>(REXCVAR_GET(online_port)), &port);
     if (!transport) {
       REXSYS_ERROR("Online play: UDP port {} is taken (another game?); online play is off",
                    REXCVAR_GET(online_port));
       return;
+    }
+    if (REXCVAR_GET(online_steam)) {
+      // Steam's frames go through the helper; the UDP socket keeps the direct players.
+      auto bridge = std::make_unique<online::SteamBridge>(std::move(transport), port);
+      online_steam_ = bridge.get();
+      transport = std::move(bridge);
     }
     online_net_ = std::make_unique<online::VirtualNet>(user_profile_->online_xuid(), title_id(),
                                                        std::move(transport));
@@ -263,6 +270,11 @@ online::VirtualNet* KernelState::online_net() {
         online_net_.get(), user_profile_->online_xuid(), user_profile_->name(),
         [this](uint32_t user_index) { BroadcastNotification(0x02000002, user_index); });
     online_net_->Start(hub);
+    if (online_steam_) {
+      online_steam_->Attach(online_net_.get(), online_sessions_.get());
+      online_steam_->Start(title_id(), online::VirtualNet::kProtocolVersion,
+                           user_profile_->online_xuid(), user_profile_->name());
+    }
     uint32_t ip = online_net_->self_in_addr();
     REXSYS_INFO("Online play: UDP port {}, {}; this game is {}.{}.{}.{} to its friends", port,
                 hub.valid() ? "joining " + hub.ToString() : std::string("hosting"), ip >> 24,

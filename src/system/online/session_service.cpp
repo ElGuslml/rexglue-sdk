@@ -515,7 +515,7 @@ void SessionService::OnControl(uint64_t peer, const uint8_t* data, size_t size) 
     std::lock_guard lock(mutex_);
     REXSYS_DEBUG("online: {:016X} hosts {} session(s)", peer, sessions.size());
     remote_[peer] = std::move(sessions);
-    invite = MaybeInvite();
+    invite = MaybeAcceptPending() || MaybeInvite();
   }
   if (invite) {
     invite_(0);
@@ -532,6 +532,17 @@ void SessionService::OnPeer(uint64_t peer, bool connected) {
   Advertise(peer);
   uint8_t request = kMessageRequest;
   net_->SendControl(peer, kChannel, &request, 1);
+  // Joining an inviter's group through its hub: the inviter, reached through the hub, too.
+  uint64_t inviter = 0;
+  {
+    std::lock_guard lock(mutex_);
+    if (pending_invite_ && pending_invite_->inviter != peer && peer == net_->hub()) {
+      inviter = pending_invite_->inviter;
+    }
+  }
+  if (inviter) {
+    net_->SendControl(inviter, kChannel, &request, 1);
+  }
 }
 
 void SessionService::SetInvitePrompt(InvitePrompt prompt) {
@@ -559,7 +570,22 @@ std::vector<Friend> SessionService::Friends() const {
     }
     friends.push_back(std::move(f));
   }
+  if (external_.list) {
+    for (Friend& f : external_.list()) {
+      bool listed = f.xuid == self_xuid_ ||
+                    std::any_of(friends.begin(), friends.end(),
+                                [&](const Friend& known) { return known.xuid == f.xuid; });
+      if (!listed) {
+        friends.push_back(std::move(f));
+      }
+    }
+  }
   return friends;
+}
+
+void SessionService::SetExternalFriends(ExternalFriends friends) {
+  std::lock_guard lock(mutex_);
+  external_ = std::move(friends);
 }
 
 bool SessionService::SendInvite(uint64_t invitee) {
@@ -591,6 +617,21 @@ bool SessionService::SendInvite(uint64_t invitee) {
   }
   std::vector<uint64_t> peers = net_->ConnectedPeers();
   if (std::find(peers.begin(), peers.end(), invitee) == peers.end()) {
+    std::function<bool(uint64_t, const std::vector<uint8_t>&)> external;
+    {
+      std::lock_guard lock(mutex_);
+      external = external_.invite;
+    }
+    // Through Steam: the inviter's XUID, then the message.
+    std::vector<uint8_t> carried;
+    for (int b = 0; b < 8; ++b) {
+      carried.push_back(uint8_t(self_xuid_ >> (8 * b)));
+    }
+    carried.insert(carried.end(), message.begin(), message.end());
+    if (external && external(invitee, carried)) {
+      REXSYS_INFO("online: invited {:016X} through Steam", invitee);
+      return true;
+    }
     REXSYS_WARN("online: an invite to {:016X}, who is not connected", invitee);
     return false;
   }
@@ -599,50 +640,154 @@ bool SessionService::SendInvite(uint64_t invitee) {
   return true;
 }
 
-void SessionService::OnInvite(uint64_t peer, const uint8_t* data, size_t size) {
-  Reader r{data, size, 1};
+bool SessionService::ParseInvite(const uint8_t* data, size_t size, SessionInfo* party,
+                                 std::string* name) {
+  Reader r{data, size};
+  if (r.U8() != kMessageInvite) {
+    return false;
+  }
   const uint8_t* kid = r.Bytes(kXnKidSize);
   const uint8_t* key = r.Bytes(kXnKeySize);
   const uint8_t* host = r.Bytes(sizeof(XNADDR));
   uint8_t name_length = r.U8();
-  const uint8_t* name = r.Bytes(name_length);
+  const uint8_t* text = r.Bytes(name_length);
   if (!r.ok) {
-    return;
+    return false;
   }
-  AcceptedInvite invite;
-  invite.user_index = 0;
-  invite.invitee = LocalUserXuid(0);
-  invite.inviter = peer;
-  std::memcpy(invite.info.xnkid.data(), kid, kXnKidSize);
-  std::memcpy(invite.info.xnkey.data(), key, kXnKeySize);
-  std::memcpy(&invite.info.host, host, sizeof(XNADDR));
-  std::string inviter(reinterpret_cast<const char*>(name), name_length);
+  std::memcpy(party->xnkid.data(), kid, kXnKidSize);
+  std::memcpy(party->xnkey.data(), key, kXnKeySize);
+  std::memcpy(&party->host, host, sizeof(XNADDR));
+  name->assign(reinterpret_cast<const char*>(text), name_length);
+  return true;
+}
+
+void SessionService::AskAboutInvite(const std::string& inviter, AcceptedInvite invite,
+                                    std::function<void(const AcceptedInvite&)> accepted) {
   InvitePrompt prompt;
   {
     std::lock_guard lock(invite_prompt_mutex);
     prompt = invite_prompt;
   }
-  REXSYS_INFO("online: \"{}\" ({:016X}) invites this game to its party", inviter, peer);
+  REXSYS_INFO("online: \"{}\" ({:016X}) invites this game to its party", inviter, invite.inviter);
   if (!prompt) {
     REXSYS_INFO("online: no invite prompt: the invite is declined");
     return;
   }
-  prompt(inviter, [this, invite](bool accept) {
+  prompt(inviter, [invite, accepted = std::move(accepted)](bool accept) {
     if (!accept) {
       REXSYS_INFO("online: the invite from {:016X} declined", invite.inviter);
       return;
     }
+    accepted(invite);
+  });
+}
+
+void SessionService::OnInvite(uint64_t peer, const uint8_t* data, size_t size) {
+  AcceptedInvite invite;
+  std::string inviter;
+  if (!ParseInvite(data, size, &invite.info, &inviter)) {
+    return;
+  }
+  invite.user_index = 0;
+  invite.invitee = LocalUserXuid(0);
+  invite.inviter = peer;
+  AskAboutInvite(inviter, invite, [this](const AcceptedInvite& invite) {
     {
       std::lock_guard lock(mutex_);
       accepted_invite_ = invite;
       invited_.insert(invite.info.xnkid);
+      pending_invite_.reset();
     }
     REXSYS_INFO("online: the invite from {:016X} accepted: the game joins its party", invite.inviter);
     invite_(invite.user_index);
   });
 }
 
+void SessionService::OnExternalInvite(const uint8_t* data, size_t size,
+                                      std::function<void()> join) {
+  if (size < 8) {
+    return;
+  }
+  uint64_t inviter_xuid = 0;
+  for (int b = 0; b < 8; ++b) {
+    inviter_xuid |= uint64_t(data[b]) << (8 * b);
+  }
+  AcceptedInvite invite;
+  std::string inviter;
+  if (!ParseInvite(data + 8, size - 8, &invite.info, &inviter)) {
+    return;
+  }
+  invite.user_index = 0;
+  invite.invitee = LocalUserXuid(0);
+  invite.inviter = inviter_xuid;
+  AskAboutInvite(inviter, invite, [this, join = std::move(join)](const AcceptedInvite& invite) {
+    bool known;
+    {
+      std::lock_guard lock(mutex_);
+      invited_.insert(invite.info.xnkid);
+      known = KnowsSession(invite.info.xnkid);
+      if (known) {
+        accepted_invite_ = invite;
+        pending_invite_.reset();
+      } else {
+        pending_invite_ = invite;
+        pending_since_ = std::chrono::steady_clock::now();
+      }
+    }
+    if (known) {
+      REXSYS_INFO("online: the invite from {:016X} accepted: the game joins its party",
+                  invite.inviter);
+      invite_(invite.user_index);
+      return;
+    }
+    REXSYS_INFO("online: the invite from {:016X} accepted: joining its group first",
+                invite.inviter);
+    join();
+    // Already connected to the inviter (one group): ask for its sessions now.
+    std::vector<uint64_t> peers = net_->ConnectedPeers();
+    if (std::find(peers.begin(), peers.end(), invite.inviter) != peers.end()) {
+      uint8_t request = kMessageRequest;
+      net_->SendControl(invite.inviter, kChannel, &request, 1);
+    }
+  });
+}
+
+bool SessionService::KnowsSession(const std::array<uint8_t, kXnKidSize>& xnkid) const {
+  for (const auto& [peer, sessions] : remote_) {
+    for (const AdvertisedSession& session : sessions) {
+      if (session.info.xnkid == xnkid) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool SessionService::MaybeAcceptPending() {
+  if (!pending_invite_) {
+    return false;
+  }
+  if (std::chrono::steady_clock::now() - pending_since_ > kPendingInviteTimeout) {
+    REXSYS_WARN("online: the party of the invite from {:016X} was never found; the invite is dropped",
+                pending_invite_->inviter);
+    pending_invite_.reset();
+    return false;
+  }
+  if (!KnowsSession(pending_invite_->info.xnkid)) {
+    return false;
+  }
+  accepted_invite_ = pending_invite_;
+  pending_invite_.reset();
+  REXSYS_INFO("online: the invite from {:016X}: its party found, the game joins it",
+              accepted_invite_->inviter);
+  return true;
+}
+
 bool SessionService::MaybeInvite() {
+  if (pending_invite_) {
+    // Joining an inviter's party, not the hub's.
+    return false;
+  }
   const uint64_t hub = net_->hub();
   if (!net_->hub_endpoint().valid() || !hub) {
     return false;

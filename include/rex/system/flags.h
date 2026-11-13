@@ -23,6 +23,7 @@ REXCVAR_DECLARE(std::string, profile_name);
 REXCVAR_DECLARE(bool, online_play);
 REXCVAR_DECLARE(uint32_t, online_port);
 REXCVAR_DECLARE(std::string, online_host);
+REXCVAR_DECLARE(bool, online_steam);
 REXCVAR_DECLARE(bool, kernel_pix);
 REXCVAR_DECLARE(std::string, cl);
 REXCVAR_DECLARE(bool, kernel_debug_monitor);

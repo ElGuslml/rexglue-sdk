@@ -36,6 +36,7 @@
 #include <rex/system/xam/content_manager.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/system/online/session_service.h>
+#include <rex/system/online/steam_bridge.h>
 #include <rex/system/online/virtual_net.h>
 #include <rex/platform/dynlib.h>
 #include <rex/system/function_dispatcher.h>
@@ -207,6 +208,11 @@ class KernelState {
   online::VirtualNet* online_net();
   // Online play: the sessions between friends over that network (null without it).
   online::SessionService* online_sessions();
+  // Online play through Steam (online_steam): null when it is off.
+  online::SteamBridge* online_steam() {
+    online_net();
+    return online_steam_;
+  }
 
   // Access must be guarded by the global critical region.
   util::ObjectTable* object_table() { return &object_table_; }
@@ -364,6 +370,7 @@ class KernelState {
   std::once_flag online_net_once_;
   std::unique_ptr<online::VirtualNet> online_net_;
   std::unique_ptr<online::SessionService> online_sessions_;
+  online::SteamBridge* online_steam_ = nullptr;  // the network's transport
 
   rex::thread::global_critical_region global_critical_region_;
 
