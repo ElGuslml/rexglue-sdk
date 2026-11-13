@@ -54,6 +54,12 @@ REXCVAR_DEFINE_STRING(gamepad_tilt_calibration, "", "Input",
                       "controller's accelerometer, in thousandths of m/s2), rest and full its values at rest and "
                       "tilted. The right stick's Y, a guitar's tilt, is then that source, from 0 at rest to 32767 a "
                       "fifth short of full");
+REXCVAR_DEFINE_STRING(gamepad_ignore, "", "Input",
+                      "Controllers this game leaves alone, for another program or a second instance of a game on "
+                      "this PC: entries separated by commas, each a serial number, an SDL GUID (as the log's "
+                      "OnControllerDeviceAdded lines give them) or xinputN, the controller in XInput's slot N (0-3: "
+                      "an Xbox 360 controller's ring light N + 1), which tells identical XInput controllers apart. "
+                      "Empty: every controller");
 REXCVAR_DEFINE_BOOL(
     guitar_whammy_rest, false, "Input",
     "A guitar's whammy bar (the right stick's X axis) is at rest, -32768, until the guitar "
@@ -64,6 +70,8 @@ REXCVAR_DEFINE_BOOL(
     "A PS3 Guitar Hero guitar (USB 12BA:0100, as a CRKD guitar on its P3 setting should be) plays as an Xbox 360 "
     "guitar: yellow and blue, swapped on that protocol, put right, and its whammy bar at rest at the middle of its "
     "axis. A launcher's calibration of the bar still wins. For a game that plays guitars");
+
+REXCVAR_DECLARE(bool, input_background);
 
 namespace rex::input::sdl {
 
@@ -566,6 +574,10 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
           },
           this);
 
+      // Controllers read without the window's focus too (input_background).
+      if (REXCVAR_GET(input_background)) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+      }
       // Initialize game controller subsystem
       if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         REXLOG_ERROR("SDL: Failed to init gamecontroller subsystem: {}", SDL_GetError());
@@ -964,6 +976,40 @@ void SDLInputDriver::OnJoystickDeviceAddedLocked(const SDL_Event& event) {
   }
 }
 
+namespace {
+
+// gamepad_ignore names the controller: its serial, its GUID or its XInput slot (xinputN).
+bool IgnoredController(std::string_view serial, std::string_view guid, int xinput_slot) {
+  const std::string& list = REXCVAR_GET(gamepad_ignore);
+  size_t start = 0;
+  while (start <= list.size()) {
+    size_t end = list.find(',', start);
+    if (end == std::string::npos) {
+      end = list.size();
+    }
+    std::string_view entry(list.data() + start, end - start);
+    while (!entry.empty() && entry.front() == ' ') {
+      entry.remove_prefix(1);
+    }
+    while (!entry.empty() && entry.back() == ' ') {
+      entry.remove_suffix(1);
+    }
+    if (!entry.empty()) {
+      if ((!serial.empty() && entry == serial) || entry == guid) {
+        return true;
+      }
+      if (xinput_slot >= 0 && entry.size() == 7 && entry.substr(0, 6) == "xinput" &&
+          entry[6] == char('0' + xinput_slot)) {
+        return true;
+      }
+    }
+    start = end + 1;
+  }
+  return false;
+}
+
+}  // namespace
+
 void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
   const auto controller = SDL_OpenGamepad(event.gdevice.which);
   if (!controller) {
@@ -988,6 +1034,22 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
       static_cast<int>(SDL_GetGamepadType(controller)), XInputSubTypeName(subtype), subtype,
       SDL_GetGamepadVendor(controller), SDL_GetGamepadProduct(controller), guid_text,
       SDL_GetGamepadSerial(controller) ? SDL_GetGamepadSerial(controller) : "");
+
+  // On Windows an XInput controller's player index is its XInput slot (until it is set below).
+  const int xinput_slot = SDL_GetGamepadPlayerIndex(controller);
+  {
+    const char* id_serial = SDL_GetGamepadSerial(controller);
+    if (IgnoredController(id_serial ? id_serial : "", guid_text, xinput_slot)) {
+      REXLOG_INFO("SDL OnControllerDeviceAdded: \"{}\" (XInput slot {}) left alone (gamepad_ignore).",
+                  SDL_GetGamepadName(controller), xinput_slot);
+      SDL_CloseGamepad(controller);
+      return;
+    }
+    if (xinput_slot >= 0) {
+      REXLOG_INFO("SDL OnControllerDeviceAdded: XInput slot {} (xinput{} in gamepad_ignore).", xinput_slot,
+                  xinput_slot);
+    }
+  }
 
   // SDL_GetGamepadPlayerIndex is deliberately ignored: on Windows it reports
   // the XInput user index the OS assigned, which is unrelated to connection

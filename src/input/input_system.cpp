@@ -36,6 +36,10 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
 
 REXCVAR_DEFINE_BOOL(vibration, true, "Input", "Enable controller vibration");
+REXCVAR_DEFINE_BOOL(input_background, false, "Input",
+                    "Controllers keep playing while the game's window is not in front: two instances of a game "
+                    "on one PC, each with its own controllers (gamepad_ignore). The keyboard still needs the "
+                    "window in front");
 
 REXCVAR_DEFINE_DOUBLE(left_stick_deadzone_percentage, 0.0, "Input",
                       "Deadzone applied to the left stick, as a fraction of its range")

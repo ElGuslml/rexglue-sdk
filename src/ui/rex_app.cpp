@@ -38,6 +38,8 @@
 #include <rex/kernel/init.h>
 #include <rex/string/numeric.h>
 #include <rex/system.h>
+
+REXCVAR_DECLARE(bool, input_background);
 #include <rex/system/achievement_manager.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
@@ -346,7 +348,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
 
   if (auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system())) {
     input_sys->SetActiveCallback([this]() {
-      if (window_ && !window_->HasFocus())
+      // input_background: controllers play without the focus (the keyboard checks it itself).
+      if (window_ && !window_->HasFocus() && !REXCVAR_GET(input_background))
         return false;
       if (!imgui_drawer_ ||
           (!debug_overlay_ && !console_overlay_ && !settings_overlay_ && !achievements_overlay_))
