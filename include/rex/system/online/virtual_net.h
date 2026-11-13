@@ -219,7 +219,16 @@ class VirtualNet {
     bool closed = false;
     Clock::time_point closed_at{};
     bool close_sent = false;  // told to the peer since this game last used it
+    // This game unregistered it: nothing more is sent on it, and its next XNetXnAddrToInAddr for the peer and key
+    // makes a new one.
+    bool released = false;
+    Clock::time_point released_at{};
   };
+  // A new association, with an IN_ADDR of its own, for the peer and key in place of one closed or released: XNet
+  // makes a new security association, and a game may still hold the old address for its dead connection (Guitar
+  // Hero: Metallica's host kept its connection to a friend that had left, and the friend's return reached it and
+  // never joined). The old IN_ADDR stays lost. The lock held.
+  uint32_t Renew(uint64_t peer, const KeyId& xnkid);
   void SendClose(Association& association);
   Peer& PeerFor(uint64_t id);
   // The association's IN_ADDR here, made the first time.

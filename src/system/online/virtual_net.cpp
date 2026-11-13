@@ -431,12 +431,11 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
       KeyId xnkid;
       std::memcpy(xnkid.data(), kid, kXnKidSize);
       uint32_t in_addr = InAddrFor(src, xnkid);
-      Association& association = in_addrs_[in_addr];
-      if (association.closed && now - association.closed_at > kReopenAfter) {
-        // The peer's game uses it again (it joined the session anew).
-        association.closed = false;
-        REXSYS_INFO("online: {:016X} uses its connection in session {} again", src,
-                    Hex(xnkid.data(), xnkid.size()));
+      const Association& association = in_addrs_[in_addr];
+      if ((association.closed && now - association.closed_at > kReopenAfter) ||
+          (association.released && now - association.released_at > kReopenAfter)) {
+        // The peer's game uses the key again (it joined the session anew): a new connection.
+        in_addr = Renew(src, xnkid);
       }
       it->second->Deliver(in_addr, src_port, data + r.at, r.Left());
       break;
@@ -701,7 +700,25 @@ uint32_t VirtualNet::XnAddrToInAddr(const XNADDR& addr, const uint8_t* xnkid, ui
   std::lock_guard lock(mutex_);
   PeerFor(id);
   *in_addr = InAddrFor(id, key);
+  if (in_addrs_[*in_addr].released) {
+    *in_addr = Renew(id, key);
+  }
   return 0;
+}
+
+uint32_t VirtualNet::Renew(uint64_t peer, const KeyId& xnkid) {
+  auto known = association_in_addrs_.find({peer, xnkid});
+  if (known != association_in_addrs_.end()) {
+    Association& old = in_addrs_[known->second];
+    old.closed = true;
+    old.released = true;
+    old.close_sent = true;
+    association_in_addrs_.erase(known);
+  }
+  // A new address: the old one is still taken.
+  uint32_t in_addr = InAddrFor(peer, xnkid);
+  REXSYS_INFO("online: a new connection with {:016X} in session {}", peer, Hex(xnkid.data(), xnkid.size()));
+  return in_addr;
 }
 
 uint32_t VirtualNet::InAddrToXnAddr(uint32_t in_addr, XNADDR* addr, uint8_t* xnkid) {
@@ -739,6 +756,10 @@ uint32_t VirtualNet::UnregisterInAddr(uint32_t in_addr) {
 }
 
 void VirtualNet::SendClose(Association& association) {
+  if (!association.released) {
+    association.released = true;
+    association.released_at = Clock::now();
+  }
   if (association.close_sent) {
     return;
   }
@@ -903,7 +924,11 @@ int VirtualNet::SendTo(uint16_t src_port, uint32_t dst_in_addr, uint16_t dst_por
     ++frames_dropped_;
     return -1;
   }
-  const_cast<Association*>(association)->close_sent = false;
+  if (association->released) {
+    // Unregistered by this game: XNet sends nothing more on it.
+    ++frames_dropped_;
+    return int(size);
+  }
   std::vector<uint8_t> payload;
   payload.reserve(kXnKidSize + 4 + size);
   payload.insert(payload.end(), association->xnkid.begin(), association->xnkid.end());

@@ -317,6 +317,28 @@ TEST_CASE("A connection the peer's game closes is lost here, its other session's
   // The party's key unregistered: every connection of it.
   CHECK(host.net->UnregisterKey(party) == 0);
   REQUIRE(WaitFor([&] { return b.net->GetConnectStatus(party_in_b) == kConnectLost; }));
+
+  // B's game lets the match go too, then joins a session with that key again: a new connection with an address of
+  // its own, while the old address stays lost (a game may still hold it for the dead connection).
+  CHECK(b.net->UnregisterInAddr(match_in_b) == 0);
+  uint32_t again = 0;
+  REQUIRE(b.net->XnAddrToInAddr(host_addr, match, &again) == 0);
+  CHECK(again != match_in_b);
+  CHECK(b.net->GetConnectStatus(again) == kConnectConnected);
+  CHECK(b.net->GetConnectStatus(match_in_b) == kConnectLost);
+  // Nothing is sent on the released address; the new one reaches the host, at an address of B's new there too.
+  FakeSocket host_socket;
+  uint16_t port = 1000;
+  REQUIRE(host.net->Bind(&host_socket, &port));
+  const uint8_t data[] = {0, 1, 'x'};
+  b.net->SendTo(1000, match_in_b, 1000, data, sizeof(data));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  CHECK(host_socket.count() == 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // past kReopenAfter
+  CHECK(b.net->SendTo(1000, again, 1000, data, sizeof(data)) == sizeof(data));
+  REQUIRE(WaitFor([&] { return host_socket.count() == 1; }));
+  CHECK(host_socket.received[0].src_in_addr != b_match_in_host);
+  CHECK(host.net->GetConnectStatus(b_match_in_host) == kConnectLost);
   b.net->Stop();
   host.net->Stop();
 }
