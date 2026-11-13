@@ -561,6 +561,13 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
     }
   }
 
+  // The pad as the player holds it, before the buttons taken earlier are masked: a host UI that watches a hold (the
+  // invite card's START) sees the button on every read while it is held, not only on the first one.
+  X_INPUT_GAMEPAD held = {};
+  if (result == X_ERROR_SUCCESS && out_state) {
+    held = out_state->gamepad;
+  }
+
   if (result == X_ERROR_SUCCESS && out_state && user_index < kMaxGuestUsers &&
       consumed_buttons_[user_index] != 0) {
     const uint16_t buttons = out_state->gamepad.buttons;
@@ -570,21 +577,21 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   }
 
   // A host UI watching the guest's reads (SetHostInputFilter) can take this one: the guest reads the pad at rest,
-  // and the buttons held stay masked until released. The filter runs unlocked, as it may open a dialog that reads
-  // the controllers on the UI thread.
+  // and the buttons held stay masked until released. The filter sees the pad unmasked (a button it took is still
+  // held) and runs unlocked, as it may open a dialog that reads the controllers on the UI thread.
   lock.unlock();
   if (result == X_ERROR_SUCCESS && out_state) {
     bool take = false;
     {
       std::lock_guard filter_lock(host_filter_mutex_);
       if (host_filter_) {
-        take = host_filter_(user_index, out_state->gamepad);
+        take = host_filter_(user_index, held);
       }
     }
     if (take) {
       if (user_index < kMaxGuestUsers) {
         std::lock_guard consumed_lock(mutex_);
-        consumed_buttons_[user_index] |= static_cast<uint16_t>(out_state->gamepad.buttons);
+        consumed_buttons_[user_index] |= static_cast<uint16_t>(held.buttons);
       }
       std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
     }

@@ -388,3 +388,36 @@ TEST_CASE("A gamepad played as a guitar keeps a whammy bar's rest", "[input]") {
   REXCVAR_SET(gamepad_subtype, subtype);
   REXCVAR_SET(gamepad_whammy_rest, whammy_rest);
 }
+
+TEST_CASE("A host filter sees a button it took for as long as it is held", "[input]") {
+  FakeDriver* driver = nullptr;
+  auto system = SharedSystem(&driver);
+  driver->Add(1);
+  constexpr uint16_t kStart = rex::input::X_INPUT_GAMEPAD_START;
+  // As the invite card: START taken while it is held, until the hold is enough.
+  int seen = 0;
+  bool taking = true;
+  system->SetHostInputFilter([&](uint32_t, const rex::input::X_INPUT_GAMEPAD& gamepad) {
+    bool start = (static_cast<uint16_t>(gamepad.buttons) & kStart) != 0;
+    seen += start ? 1 : 0;
+    return start && taking;
+  });
+  X_INPUT_STATE state = {};
+
+  driver->SetButtons(1, kStart);
+  for (int read = 1; read <= 3; read++) {
+    REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+    REQUIRE(seen == read);
+    REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == 0);
+  }
+
+  // The hold is over (the card closed): the button stays from the game until it is released.
+  taking = false;
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == 0);
+  driver->SetButtons(1, 0);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  driver->SetButtons(1, kStart);
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == kStart);
+}
