@@ -376,8 +376,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
         gamepad = state.gamepad;
         return true;
       };
-      // Online play's invites from friends (rex/ui/overlay/invite_prompt.h): the same input, a dialog to join or
-      // ignore, which the session service asks for.
+      // Online play's invites from friends (rex/ui/overlay/invite_prompt.h): a card for a few seconds, START held
+      // to join, which the session service asks for.
       rex::ui::SetupInvitePrompt(imgui_drawer_.get(), &app_context(), quit_input);
       rex::system::online::SessionService::SetInvitePrompt(
           [](const std::string& inviter, std::function<void(bool)> answer) {
@@ -388,7 +388,12 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
           window_->RequestClose();
         }
       });
-      input_sys->SetHostInputFilter(&rex::ui::QuitPromptInputFilter);
+      // Both see every read: the invite card takes START while it is up, the quit prompt opens on B.
+      input_sys->SetHostInputFilter([](uint32_t user_index, const rex::input::X_INPUT_GAMEPAD& gamepad) {
+        bool invite = rex::ui::InvitePromptInputFilter(user_index, gamepad);
+        bool quit = rex::ui::QuitPromptInputFilter(user_index, gamepad);
+        return invite || quit;
+      });
     }
   }
 
