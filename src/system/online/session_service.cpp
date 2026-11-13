@@ -162,6 +162,15 @@ void SessionService::TryDeliver() {
     deliver_ = false;
     gate_open_since_ = {};
     user_index = deliver_user_;
+    // The party gone while the game was not told yet (its gate closed or settling): the inviter deleted it (it left
+    // its online lobby, or the game) or left. Told now, the game would join nothing and say "the session is no
+    // longer available"; dropped, it stays where it is, as when its host leaves.
+    if (accepted_invite_ && !KnowsSession(accepted_invite_->info.xnkid)) {
+      REXSYS_INFO("online: {:016X}'s party (id {}) is gone; its invite is dropped", accepted_invite_->inviter,
+                  KidText(accepted_invite_->info.xnkid));
+      accepted_invite_.reset();
+      return;
+    }
   }
   if (gate) {
     REXSYS_INFO("online: the game is told of the invite now");

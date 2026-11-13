@@ -265,3 +265,37 @@ TEST_CASE("An invite is told to the game once its gate has been open a second", 
   REQUIRE(WaitFor([&] { return friend_.invites == 1; }));
   CHECK(std::chrono::steady_clock::now() - opened >= SessionService::kInviteGateSettle);
 }
+
+TEST_CASE("An invite whose party is gone before the game is told is dropped", "[online]") {
+  Player host(0x0009000000000801ull, "Host");
+  Player friend_(0x0009000000000802ull, "Friend");
+  host.net->Start({});
+  friend_.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return friend_.net->hub() == host.net->self(); }));
+  std::atomic<bool> open = false;
+  friend_.sessions->SetInviteGate([&] { return open.load(); });
+
+  // The friend back in its own lobby, auto-invited to the host's new party while its gate is closed.
+  SessionInfo party_info, own_info;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x1000, kParty, 0, 8, 0, &party_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.sessions->FindById(party_info.xnkid).has_value(); }));
+  friend_.sessions->Create(0x3000, kParty, 0, 8, 0, &own_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.sessions->accepted_invite().has_value(); }));
+
+  // The host leaves its online lobby: its party deleted before the gate opens.
+  host.sessions->Delete(0x1000);
+  REQUIRE(WaitFor([&] { return !friend_.sessions->FindById(party_info.xnkid).has_value(); }));
+  open = true;
+  REQUIRE(WaitFor([&] { return !friend_.sessions->accepted_invite().has_value(); }));
+  std::this_thread::sleep_for(SessionService::kInviteGateSettle + std::chrono::milliseconds(300));
+  CHECK(friend_.invites == 0);
+
+  // A party of the host's again: invited, and told (the old party's invite does not stand in the way).
+  SessionInfo second_info;
+  host.sessions->Create(0x1001, kParty, 0, 8, 0, &second_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.invites == 1; }, 4000));
+  auto invite = friend_.sessions->accepted_invite();
+  REQUIRE(invite);
+  CHECK(invite->info.xnkid == second_info.xnkid);
+}
