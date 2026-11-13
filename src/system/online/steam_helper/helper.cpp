@@ -58,6 +58,13 @@ constexpr auto kParentInterval = std::chrono::milliseconds(500);
 constexpr auto kLobbyRetry = std::chrono::seconds(10);
 // The helpers' own messages on kChannelHelper.
 constexpr uint8_t kHelperInvite = 1;  // u64 lobby, the invite
+// u32 title, u64 xuid, u64 lobby, str name, str persona: this game is running, told to a friend seen in this app.
+// Steam does not always show a friend's game both ways (a profile whose game details are private shows as online,
+// not in a game), so one side seeing the other is enough for both friends lists.
+constexpr uint8_t kHelperHere = 2;
+constexpr auto kHereInterval = std::chrono::seconds(5);
+// A friend heard from stays listed this long after its last word.
+constexpr auto kHeardFor = std::chrono::seconds(16);
 
 struct FriendEntry {
   uint64_t steam_id = 0;
@@ -459,7 +466,58 @@ class Helper {
     SendGame(w);
   }
 
+  // A friend's game is running (kHelperHere): listed for kHeardFor even if Steam does not show its game here.
+  void OnHere(uint64_t from, const uint8_t* data, size_t size) {
+    if (!backend_->IsFriend(from)) {
+      return;
+    }
+    Reader r{data, size};
+    r.at = 1;
+    FriendEntry entry;
+    uint32_t title = r.U32();
+    entry.steam_id = from;
+    entry.xuid = r.U64();
+    entry.lobby = r.U64();
+    entry.name = r.Str();
+    entry.persona = r.Str();
+    if (!r.ok || title != title_ || !entry.xuid) {
+      return;
+    }
+    Heard& heard = heard_[from];
+    if (!(heard.entry == entry)) {
+      if (!heard.entry.xuid) {
+        Log(0, "Steam user " + std::to_string(from) + " (\"" + entry.persona + "\") is in this game");
+      }
+      heard.entry = entry;
+      friends_dirty_ = true;
+      friends_dirty_at_ = Clock::now();
+    }
+    heard.until = Clock::now() + kHeardFor;
+  }
+
+  // Tells a friend this game is running (throttled; at once when this game's lobby changed).
+  void SayHere(uint64_t to, Clock::time_point now) {
+    Said& said = said_[to];
+    if (now < said.next && said.lobby == lobby_) {
+      return;
+    }
+    said.next = now + kHereInterval;
+    said.lobby = lobby_;
+    Writer w(static_cast<Message>(kHelperHere));
+    w.U32(title_);
+    w.U64(xuid_);
+    w.U64(lobby_);
+    w.Str(name_);
+    w.Str(backend_->SelfName());
+    // Without the magic: the helpers' messages start with their type.
+    backend_->Send(to, kChannelHelper, w.out.data() + 4, w.out.size() - 4, true);
+  }
+
   void OnHelperMessage(uint64_t from, const uint8_t* data, size_t size) {
+    if (size >= 1 && data[0] == kHelperHere) {
+      OnHere(from, data, size);
+      return;
+    }
     if (size < 9 || data[0] != kHelperInvite) {
       return;
     }
@@ -490,11 +548,14 @@ class Helper {
           requested = now + kPresenceRequestInterval;
           backend_->RequestFriendPresence(info.id);
         }
+        // Its game may be this one: told, it can list this game even if it does not see it.
+        SayHere(info.id, now);
         continue;
       }
       if (their_title != title) {
         continue;
       }
+      SayHere(info.id, now);
       FriendEntry entry;
       entry.steam_id = info.id;
       entry.xuid = ParseHex(backend_->FriendPresence(info.id, kKeyXuid));
@@ -506,6 +567,21 @@ class Helper {
         continue;
       }
       list.push_back(std::move(entry));
+    }
+    // The friends that said they are in this game and Steam does not show here; this game tells them it is too.
+    for (auto it = heard_.begin(); it != heard_.end();) {
+      if (now >= it->second.until) {
+        Log(0, "Steam user " + std::to_string(it->first) + " no longer heard from");
+        it = heard_.erase(it);
+        continue;
+      }
+      SayHere(it->first, now);
+      bool listed = std::any_of(list.begin(), list.end(),
+                                [&](const FriendEntry& e) { return e.steam_id == it->first; });
+      if (!listed) {
+        list.push_back(it->second.entry);
+      }
+      ++it;
     }
     std::sort(list.begin(), list.end(),
               [](const FriendEntry& a, const FriendEntry& b) { return a.steam_id < b.steam_id; });
@@ -553,6 +629,16 @@ class Helper {
 
   std::vector<FriendEntry> friends_;
   std::map<uint64_t, Clock::time_point> presence_requested_;
+  struct Heard {
+    FriendEntry entry;
+    Clock::time_point until{};
+  };
+  std::map<uint64_t, Heard> heard_;
+  struct Said {
+    Clock::time_point next{};
+    uint64_t lobby = 0;
+  };
+  std::map<uint64_t, Said> said_;
   Clock::time_point next_friends_{};
   Clock::time_point next_callbacks_{};
   bool friends_dirty_ = false;

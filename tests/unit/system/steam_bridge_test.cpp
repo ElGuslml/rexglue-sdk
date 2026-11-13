@@ -35,6 +35,8 @@ struct FakeSteam {
     std::string persona;
     std::set<uint64_t> friends;
     bool running = false;
+    // Its game not shown to its friends (a profile whose game details are private).
+    bool game_hidden = false;
     std::map<std::string, std::string> presence;
     std::deque<std::function<void(const Backend::Events&)>> events;
     std::map<int, std::deque<std::pair<uint64_t, std::vector<uint8_t>>>> inbox;
@@ -185,7 +187,7 @@ class FakeBackend : public Backend {
     std::lock_guard lock(steam_->mutex);
     std::vector<FriendInfo> list;
     for (uint64_t f : steam_->users[id_].friends) {
-      if (steam_->users[f].running) {
+      if (steam_->users[f].running && !steam_->users[f].game_hidden) {
         list.push_back({f, steam_->users[f].persona, steam_->LobbyOf(f)});
       }
     }
@@ -402,4 +404,45 @@ TEST_CASE("Steam: \"Join game\" from Steam takes a friend to the host's party", 
   REQUIRE(invite);
   CHECK(invite->info.xnkid == party.xnkid);
   CHECK(friend_.net->hub() == kXuidHost);
+}
+
+TEST_CASE("Steam: a friend whose game Steam does not show is listed and invited all the same", "[online]") {
+  FakeSteam steam;
+  constexpr uint64_t kSteamHost = 0x0110000100000701ull, kSteamFriend = 0x0110000100000702ull;
+  constexpr uint64_t kXuidHost = 0x0009000000000701ull, kXuidFriend = 0x0009000000000702ull;
+  steam.AddUser(kSteamHost, "host_persona");
+  steam.AddUser(kSteamFriend, "friend_persona");
+  steam.Befriend(kSteamHost, kSteamFriend);
+  // The friend's game details are private: the host's Steam never shows it in a game.
+  steam.users[kSteamFriend].game_hidden = true;
+
+  std::atomic<int> prompts = 0;
+  SessionService::SetInvitePrompt([&](const std::string& name, std::function<void(bool)> answer) {
+    CHECK(name == "Host");
+    ++prompts;
+    answer(true);
+  });
+
+  Game host(&steam, kSteamHost, kXuidHost, "Host");
+  Game friend_(&steam, kSteamFriend, kXuidFriend, "Friend");
+  REQUIRE(WaitFor([&] { return host.bridge->ready() && friend_.bridge->ready(); }));
+
+  // The friend sees the host and tells it it is here: both lists, though the host's Steam shows no game.
+  REQUIRE(WaitFor([&] { return Lists(*friend_.sessions, kXuidHost, "Host"); }));
+  REQUIRE(WaitFor([&] { return Lists(*host.sessions, kXuidFriend, "Friend"); }, 10000));
+
+  // The host invites the friend from its list; the friend joins its party.
+  SessionInfo party, own;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x1000, kParty, 0, 8, 0, &party, &nonce);
+  friend_.sessions->Create(0x3000, kParty, 0, 8, 0, &own, &nonce);
+  REQUIRE(host.sessions->SendInvite(kXuidFriend));
+  REQUIRE(WaitFor([&] { return friend_.invites == 1; }));
+  CHECK(prompts == 1);
+  auto invite = friend_.sessions->accepted_invite();
+  REQUIRE(invite);
+  CHECK(invite->info.xnkid == party.xnkid);
+  CHECK(friend_.net->hub() == kXuidHost);
+
+  SessionService::SetInvitePrompt({});
 }
