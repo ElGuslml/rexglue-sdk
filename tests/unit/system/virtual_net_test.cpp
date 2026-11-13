@@ -290,3 +290,33 @@ TEST_CASE("A peer of another game is refused", "[online]") {
   stranger.net->Stop();
   host.net->Stop();
 }
+
+TEST_CASE("A connection the peer's game closes is lost here, its other session's not", "[online]") {
+  TestPeer host(0x0009000000000041ull);
+  TestPeer b(0x0009000000000042ull);
+  host.net->Start({});
+  b.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return b.net->hub() == host.net->self(); }));
+  XNADDR host_addr{}, b_addr{};
+  host.net->GetTitleXnAddr(&host_addr);
+  b.net->GetTitleXnAddr(&b_addr);
+  const uint8_t party[kXnKidSize] = {0x81, 4, 4, 4, 4, 4, 4, 4};
+  const uint8_t match[kXnKidSize] = {0x82, 5, 5, 5, 5, 5, 5, 5};
+  uint32_t party_in_b = 0, match_in_b = 0, b_party_in_host = 0, b_match_in_host = 0;
+  REQUIRE(b.net->XnAddrToInAddr(host_addr, party, &party_in_b) == 0);
+  REQUIRE(b.net->XnAddrToInAddr(host_addr, match, &match_in_b) == 0);
+  REQUIRE(host.net->XnAddrToInAddr(b_addr, party, &b_party_in_host) == 0);
+  REQUIRE(host.net->XnAddrToInAddr(b_addr, match, &b_match_in_host) == 0);
+  CHECK(b.net->GetConnectStatus(match_in_b) == kConnectConnected);
+
+  // The host's game leaves the match: its address for B there, unregistered.
+  CHECK(host.net->UnregisterInAddr(b_match_in_host) == 0);
+  REQUIRE(WaitFor([&] { return b.net->GetConnectStatus(match_in_b) == kConnectLost; }));
+  CHECK(b.net->GetConnectStatus(party_in_b) == kConnectConnected);
+
+  // The party's key unregistered: every connection of it.
+  CHECK(host.net->UnregisterKey(party) == 0);
+  REQUIRE(WaitFor([&] { return b.net->GetConnectStatus(party_in_b) == kConnectLost; }));
+  b.net->Stop();
+  host.net->Stop();
+}

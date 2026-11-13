@@ -241,3 +241,27 @@ TEST_CASE("A ranked session is made a player match", "[online]") {
   REQUIRE(details);
   CHECK(details->flags == kGame);
 }
+
+TEST_CASE("An invite is told to the game once its gate has been open a second", "[online]") {
+  Player host(0x0009000000000701ull, "Host");
+  Player friend_(0x0009000000000702ull, "Friend");
+  host.net->Start({});
+  friend_.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return friend_.net->hub() == host.net->self(); }));
+  std::atomic<bool> open = false;
+  friend_.sessions->SetInviteGate([&] { return open.load(); });
+
+  SessionInfo party_info, own_info;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x1000, kParty, 0, 8, 0, &party_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.sessions->FindById(party_info.xnkid).has_value(); }));
+  friend_.sessions->Create(0x3000, kParty, 0, 8, 0, &own_info, &nonce);
+  // Accepted (the hub's party), not told while the game is loading.
+  REQUIRE(WaitFor([&] { return friend_.sessions->accepted_invite().has_value(); }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  CHECK(friend_.invites == 0);
+  auto opened = std::chrono::steady_clock::now();
+  open = true;
+  REQUIRE(WaitFor([&] { return friend_.invites == 1; }));
+  CHECK(std::chrono::steady_clock::now() - opened >= SessionService::kInviteGateSettle);
+}

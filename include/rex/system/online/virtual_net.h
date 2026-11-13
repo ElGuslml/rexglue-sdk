@@ -151,6 +151,8 @@ class VirtualNet {
   // A peer connected (true: it said hello or answered) or was lost (false).
   using PeerHandler = std::function<void(uint64_t peer, bool connected)>;
   void SetPeerHandler(PeerHandler handler);
+  // Called on the network thread every few milliseconds, outside the network's lock.
+  void SetTickHandler(std::function<void()> handler);
 
  private:
   enum class FrameType : uint8_t {
@@ -163,6 +165,7 @@ class VirtualNet {
     kQosReply = 7,
     kBye = 8,
     kControl = 9,
+    kClose = 10,  // the sender's game unregistered its association (the key ID) with the receiver
   };
   using Clock = std::chrono::steady_clock;
 
@@ -211,7 +214,13 @@ class VirtualNet {
   struct Association {
     uint64_t peer = 0;
     KeyId xnkid{};
+    // The peer's game unregistered it (XNetUnregisterInAddr or the session's key): lost here, as XNet
+    // reports a security association the other side tore down.
+    bool closed = false;
+    Clock::time_point closed_at{};
+    bool close_sent = false;  // told to the peer since this game last used it
   };
+  void SendClose(Association& association);
   Peer& PeerFor(uint64_t id);
   // The association's IN_ADDR here, made the first time.
   uint32_t InAddrFor(uint64_t peer, const KeyId& xnkid);
@@ -244,6 +253,7 @@ class VirtualNet {
   std::string self_name_;
   std::map<uint8_t, ControlHandler> control_handlers_;
   PeerHandler peer_handler_;
+  std::function<void()> tick_handler_;
   uint32_t next_qos_id_ = 1;
   uint16_t next_port_ = 49152;
   uint32_t ping_seq_ = 0;

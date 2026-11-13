@@ -269,8 +269,8 @@ struct Game {
                   });
   }
   ~Game() {
-    sessions.reset();
     net->Stop();
+    sessions.reset();
     stop_helper = true;
     if (helper.joinable()) {
       helper.join();

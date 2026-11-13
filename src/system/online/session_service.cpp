@@ -25,6 +25,7 @@ constexpr uint8_t kMessageInvite = 3;    // an invite to the sender's party: its
 
 std::mutex invite_prompt_mutex;
 SessionService::InvitePrompt invite_prompt;
+std::function<bool()> default_invite_gate;  // under invite_prompt_mutex
 
 void Put16(std::vector<uint8_t>& out, uint16_t v) {
   out.push_back(uint8_t(v));
@@ -92,6 +93,93 @@ SessionService::SessionService(VirtualNet* net, uint64_t self_xuid, std::string 
     OnControl(peer, data, size);
   });
   net_->SetPeerHandler([this](uint64_t peer, bool connected) { OnPeer(peer, connected); });
+  net_->SetTickHandler([this] { Tick(); });
+  std::lock_guard lock(invite_prompt_mutex);
+  invite_gate_ = default_invite_gate;
+}
+
+void SessionService::SetDefaultInviteGate(std::function<bool()> gate) {
+  std::lock_guard lock(invite_prompt_mutex);
+  default_invite_gate = std::move(gate);
+}
+
+SessionService::~SessionService() {
+  net_->SetTickHandler({});
+  net_->SetPeerHandler({});
+  net_->SetControlHandler(kChannel, {});
+}
+
+void SessionService::SetInviteGate(std::function<bool()> gate) {
+  std::lock_guard lock(mutex_);
+  invite_gate_ = std::move(gate);
+}
+
+void SessionService::Deliver(uint32_t user_index) {
+  bool gated;
+  {
+    std::lock_guard lock(mutex_);
+    deliver_ = true;
+    deliver_user_ = user_index;
+    gate_open_since_ = {};
+    gated = bool(invite_gate_);
+  }
+  if (gated) {
+    REXSYS_INFO("online: the game is told of the invite once it allows (its gate open for {} ms)",
+                std::chrono::duration_cast<std::chrono::milliseconds>(kInviteGateSettle).count());
+  }
+  TryDeliver();
+}
+
+void SessionService::TryDeliver() {
+  std::function<bool()> gate;
+  {
+    std::lock_guard lock(mutex_);
+    if (!deliver_) {
+      return;
+    }
+    gate = invite_gate_;
+  }
+  const bool open = !gate || gate();
+  const auto now = std::chrono::steady_clock::now();
+  uint32_t user_index;
+  {
+    std::lock_guard lock(mutex_);
+    if (!deliver_) {
+      return;
+    }
+    if (gate) {
+      if (!open) {
+        gate_open_since_ = {};
+        return;
+      }
+      if (gate_open_since_ == std::chrono::steady_clock::time_point{}) {
+        gate_open_since_ = now;
+      }
+      if (now - gate_open_since_ < kInviteGateSettle) {
+        return;
+      }
+    }
+    deliver_ = false;
+    gate_open_since_ = {};
+    user_index = deliver_user_;
+  }
+  if (gate) {
+    REXSYS_INFO("online: the game is told of the invite now");
+  }
+  invite_(user_index);
+}
+
+void SessionService::Tick() {
+  {
+    std::lock_guard lock(mutex_);
+    if (pending_invite_ &&
+        std::chrono::steady_clock::now() - pending_since_ > kPendingInviteTimeout) {
+      REXSYS_WARN("online: the party of the invite from {:016X} was never found; the invite is dropped",
+                  pending_invite_->inviter);
+      pending_invite_.reset();
+    }
+  }
+  TryDeliver();
 }
 
 uint64_t SessionService::LocalUserXuid(uint32_t user_index) const {
@@ -161,7 +249,7 @@ void SessionService::Create(uint32_t obj, uint32_t flags, uint32_t user_index, u
     Advertise(0);
   }
   if (invite) {
-    invite_(0);
+    Deliver(0);
   }
 }
 
@@ -282,7 +370,7 @@ void SessionService::Modify(uint32_t obj, uint32_t flags, uint32_t max_public,
     Advertise(0);
   }
   if (invite) {
-    invite_(0);
+    Deliver(0);
   }
 }
 
@@ -518,7 +606,7 @@ void SessionService::OnControl(uint64_t peer, const uint8_t* data, size_t size) 
     invite = MaybeAcceptPending() || MaybeInvite();
   }
   if (invite) {
-    invite_(0);
+    Deliver(0);
   }
 }
 
@@ -699,7 +787,7 @@ void SessionService::OnInvite(uint64_t peer, const uint8_t* data, size_t size) {
       pending_invite_.reset();
     }
     REXSYS_INFO("online: the invite from {:016X} accepted: the game joins its party", invite.inviter);
-    invite_(invite.user_index);
+    Deliver(invite.user_index);
   });
 }
 
@@ -737,7 +825,7 @@ void SessionService::OnExternalInvite(const uint8_t* data, size_t size,
     if (known) {
       REXSYS_INFO("online: the invite from {:016X} accepted: the game joins its party",
                   invite.inviter);
-      invite_(invite.user_index);
+      Deliver(invite.user_index);
       return;
     }
     REXSYS_INFO("online: the invite from {:016X} accepted: joining its group first",

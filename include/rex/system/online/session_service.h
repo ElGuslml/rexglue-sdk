@@ -124,6 +124,8 @@ class SessionService {
   // invite: raises the console's "invite accepted" notification for a user (the network thread).
   SessionService(VirtualNet* net, uint64_t self_xuid, std::string self_name,
                  std::function<void(uint32_t user_index)> invite);
+  // Unhooks it from the network (stop the network first: a handler may be running).
+  ~SessionService();
 
   // A user's contexts and properties (XUserSetContext, XUserSetProperty): a session advertises its
   // host user's.
@@ -182,6 +184,15 @@ class SessionService {
   void OnExternalInvite(const uint8_t* data, size_t size, std::function<void()> join);
   static constexpr auto kPendingInviteTimeout = std::chrono::seconds(30);
 
+  // When the game may be told of an accepted invite (XN_LIVE_INVITE_ACCEPTED): a game acts on it at
+  // once, and one told while it loads (Guitar Hero: Metallica, leaving a song) may join the party
+  // while its lobby menu is being built, and crash. The game is told once the gate has been open
+  // for kInviteGateSettle; none: at once. Asked on the game's or the network's thread.
+  void SetInviteGate(std::function<bool()> gate);
+  // The gate every SessionService made after it starts with (the app's, before online play starts).
+  static void SetDefaultInviteGate(std::function<bool()> gate);
+  static constexpr auto kInviteGateSettle = std::chrono::seconds(1);
+
   // Decoding of an advertisement (tests).
   static std::vector<AdvertisedSession> DecodeSessions(const uint8_t* data, size_t size,
                                                        uint64_t owner);
@@ -205,6 +216,11 @@ class SessionService {
   bool KnowsSession(const std::array<uint8_t, kXnKidSize>& xnkid) const;
   // The pending invite's party advertised (the lock held): true to tell the game.
   bool MaybeAcceptPending();
+  // Tells the game of the accepted invite (accepted_invite_) for the user, now or once the gate
+  // allows; outside the lock.
+  void Deliver(uint32_t user_index);
+  void TryDeliver();
+  void Tick();
   // A joiner in its own lobby is invited to the hub's open party (the lock held); true: call
   // invite_ once the lock is released.
   bool MaybeInvite();
@@ -227,6 +243,10 @@ class SessionService {
   std::optional<AcceptedInvite> pending_invite_;
   std::chrono::steady_clock::time_point pending_since_{};
   ExternalFriends external_;
+  std::function<bool()> invite_gate_;
+  bool deliver_ = false;
+  uint32_t deliver_user_ = 0;
+  std::chrono::steady_clock::time_point gate_open_since_{};
 };
 
 }  // namespace rex::system::online

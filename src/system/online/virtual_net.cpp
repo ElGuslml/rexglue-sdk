@@ -15,6 +15,10 @@ namespace rex::system::online {
 
 namespace {
 
+// Data on an association its peer closed reopens it only this long after the close (frames sent just
+// before the close may arrive after it).
+constexpr auto kReopenAfter = std::chrono::seconds(2);
+
 // A frame: "RXNP", version, type, flags, 0, source peer, destination peer (0: whoever receives it,
 // for a hello to an address), then the type's payload. Little-endian.
 constexpr uint8_t kMagic[4] = {'R', 'X', 'N', 'P'};
@@ -426,7 +430,15 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
       }
       KeyId xnkid;
       std::memcpy(xnkid.data(), kid, kXnKidSize);
-      it->second->Deliver(InAddrFor(src, xnkid), src_port, data + r.at, r.Left());
+      uint32_t in_addr = InAddrFor(src, xnkid);
+      Association& association = in_addrs_[in_addr];
+      if (association.closed && now - association.closed_at > kReopenAfter) {
+        // The peer's game uses it again (it joined the session anew).
+        association.closed = false;
+        REXSYS_INFO("online: {:016X} uses its connection in session {} again", src,
+                    Hex(xnkid.data(), xnkid.size()));
+      }
+      it->second->Deliver(in_addr, src_port, data + r.at, r.Left());
       break;
     }
     case FrameType::kPing:
@@ -488,6 +500,25 @@ void VirtualNet::OnFrame(const Endpoint& from, const uint8_t* data, size_t size)
           if (target.rtts.size() >= lookup.probes || state != 1) {
             FinishQosTarget(lookup, i);
           }
+        }
+      }
+      break;
+    }
+    case FrameType::kClose: {
+      const uint8_t* kid = r.Bytes(kXnKidSize);
+      if (!r.ok) {
+        return;
+      }
+      KeyId xnkid;
+      std::memcpy(xnkid.data(), kid, kXnKidSize);
+      auto known = association_in_addrs_.find({src, xnkid});
+      if (known != association_in_addrs_.end()) {
+        Association& association = in_addrs_[known->second];
+        if (!association.closed) {
+          association.closed = true;
+          association.closed_at = now;
+          REXSYS_INFO("online: {:016X} closed its connection in session {}: lost here", src,
+                      Hex(xnkid.data(), xnkid.size()));
         }
       }
       break;
@@ -640,6 +671,14 @@ void VirtualNet::Tick() {
                        qos_lookups_.end());
   }
   RunCallbacks();
+  std::function<void()> tick;
+  {
+    std::lock_guard lock(mutex_);
+    tick = tick_handler_;
+  }
+  if (tick) {
+    tick();
+  }
 }
 
 void VirtualNet::GetTitleXnAddr(XNADDR* addr) const {
@@ -686,9 +725,27 @@ uint32_t VirtualNet::InAddrToXnAddr(uint32_t in_addr, XNADDR* addr, uint8_t* xnk
   return 0;
 }
 
-uint32_t VirtualNet::UnregisterInAddr(uint32_t) {
-  // The peer stays known (its frames keep arriving while the game plays with it).
+uint32_t VirtualNet::UnregisterInAddr(uint32_t in_addr) {
+  // The association stays here (its frames may still arrive); the peer is told, so that its game
+  // sees the connection lost, as with XNet's security associations. A host leaving a match counts on
+  // it: its game's last message to the members may never be sent (Guitar Hero: Metallica's friend
+  // played on alone).
+  std::lock_guard lock(mutex_);
+  auto it = in_addrs_.find(in_addr);
+  if (it != in_addrs_.end()) {
+    SendClose(it->second);
+  }
   return 0;
+}
+
+void VirtualNet::SendClose(Association& association) {
+  if (association.close_sent) {
+    return;
+  }
+  association.close_sent = true;
+  REXSYS_INFO("online: the game closed its connection with {:016X} in session {}", association.peer,
+              Hex(association.xnkid.data(), association.xnkid.size()));
+  SendFrame(association.peer, FrameType::kClose, association.xnkid.data(), association.xnkid.size());
 }
 
 uint32_t VirtualNet::Connect(uint32_t in_addr) {
@@ -718,6 +775,9 @@ uint32_t VirtualNet::GetConnectStatus(uint32_t in_addr) {
   if (!association) {
     return kConnectIdle;
   }
+  if (association->closed) {
+    return kConnectLost;
+  }
   auto peer = peers_.find(association->peer);
   return peer != peers_.end() ? peer->second.status : kConnectIdle;
 }
@@ -740,6 +800,11 @@ uint32_t VirtualNet::UnregisterKey(const uint8_t* xnkid) {
   std::memcpy(kid.data(), xnkid, kXnKidSize);
   std::lock_guard lock(mutex_);
   keys_.erase(kid);
+  for (auto& [in_addr, association] : in_addrs_) {
+    if (association.xnkid == kid) {
+      SendClose(association);
+    }
+  }
   return 0;
 }
 
@@ -838,6 +903,7 @@ int VirtualNet::SendTo(uint16_t src_port, uint32_t dst_in_addr, uint16_t dst_por
     ++frames_dropped_;
     return -1;
   }
+  const_cast<Association*>(association)->close_sent = false;
   std::vector<uint8_t> payload;
   payload.reserve(kXnKidSize + 4 + size);
   payload.insert(payload.end(), association->xnkid.begin(), association->xnkid.end());
@@ -888,7 +954,11 @@ std::vector<uint64_t> VirtualNet::ConnectedPeers() const {
 
 void VirtualNet::SetControlHandler(uint8_t channel, ControlHandler handler) {
   std::lock_guard lock(mutex_);
-  control_handlers_[channel] = std::move(handler);
+  if (handler) {
+    control_handlers_[channel] = std::move(handler);
+  } else {
+    control_handlers_.erase(channel);
+  }
 }
 
 void VirtualNet::SendControl(uint64_t peer, uint8_t channel, const uint8_t* data, size_t size) {
@@ -903,6 +973,11 @@ void VirtualNet::SendControl(uint64_t peer, uint8_t channel, const uint8_t* data
 void VirtualNet::SetPeerHandler(PeerHandler handler) {
   std::lock_guard lock(mutex_);
   peer_handler_ = std::move(handler);
+}
+
+void VirtualNet::SetTickHandler(std::function<void()> handler) {
+  std::lock_guard lock(mutex_);
+  tick_handler_ = std::move(handler);
 }
 
 }  // namespace rex::system::online
