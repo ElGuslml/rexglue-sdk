@@ -203,6 +203,7 @@ void VirtualNet::Start(const Endpoint& hub) {
   {
     std::lock_guard lock(mutex_);
     hub_endpoint_ = hub;
+    hub_joins_ += hub.valid() ? 1 : 0;
   }
   running_ = true;
   thread_ = std::thread([this] { Run(); });
@@ -242,6 +243,7 @@ void VirtualNet::SetHub(const Endpoint& hub) {
                                          : std::string("hosting (the friends join this game)"));
   hub_endpoint_ = hub;
   hub_ = 0;
+  hub_joins_ += hub.valid() ? 1 : 0;
   hello_sent_ = {};
 }
 
@@ -953,6 +955,11 @@ uint64_t VirtualNet::hub() const {
 Endpoint VirtualNet::hub_endpoint() const {
   std::lock_guard lock(mutex_);
   return hub_endpoint_;
+}
+
+uint64_t VirtualNet::hub_joins() const {
+  std::lock_guard lock(mutex_);
+  return hub_joins_;
 }
 
 void VirtualNet::SetSelfName(const std::string& name) {

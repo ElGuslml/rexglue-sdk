@@ -168,6 +168,11 @@ void SessionService::TryDeliver() {
     if (accepted_invite_ && !KnowsSession(accepted_invite_->info.xnkid)) {
       REXSYS_INFO("online: {:016X}'s party (id {}) is gone; its invite is dropped", accepted_invite_->inviter,
                   KidText(accepted_invite_->info.xnkid));
+      if (followed_party_ == accepted_invite_->info.xnkid) {
+        // The join not served yet: the hub's next party takes its place.
+        followed_join_ = 0;
+      }
+      followed_party_.reset();
       accepted_invite_.reset();
       return;
     }
@@ -889,6 +894,12 @@ bool SessionService::MaybeInvite() {
   if (!net_->hub_endpoint().valid() || !hub) {
     return false;
   }
+  // Once per join: the joiner is taken to one of the hub's parties, not to every party the hub makes after it
+  // (the host leaving its party, or going online again, makes a new one; the friend joins it when invited).
+  const uint64_t join = net_->hub_joins();
+  if (join == followed_join_) {
+    return false;
+  }
   // In its own online lobby: a party it hosts.
   bool in_lobby = std::any_of(sessions_.begin(), sessions_.end(), [](const auto& entry) {
     const LocalSession& s = entry.second;
@@ -914,6 +925,8 @@ bool SessionService::MaybeInvite() {
       continue;
     }
     invited_.insert(party.info.xnkid);
+    followed_join_ = join;
+    followed_party_ = party.info.xnkid;
     AcceptedInvite invite;
     invite.user_index = 0;
     invite.invitee = LocalUserXuid(0);

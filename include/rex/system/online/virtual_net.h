@@ -136,6 +136,8 @@ class VirtualNet {
   uint64_t hub() const;
   // The hub this game joins (online_host), invalid when it hosts.
   Endpoint hub_endpoint() const;
+  // The joins of a hub so far (SetHub with a valid one): each is the player's choice to play with that host.
+  uint64_t hub_joins() const;
 
   // The player's name, sent in the hello (a peer's is known once it said hello).
   void SetSelfName(const std::string& name);
@@ -249,6 +251,7 @@ class VirtualNet {
   mutable std::mutex mutex_;
   Endpoint hub_endpoint_;
   uint64_t hub_ = 0;
+  uint64_t hub_joins_ = 0;
   Clock::time_point hello_sent_{};
   std::map<uint64_t, Peer> peers_;
   std::map<uint32_t, Association> in_addrs_;

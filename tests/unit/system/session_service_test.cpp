@@ -299,3 +299,42 @@ TEST_CASE("An invite whose party is gone before the game is told is dropped", "[
   REQUIRE(invite);
   CHECK(invite->info.xnkid == second_info.xnkid);
 }
+
+TEST_CASE("A friend is taken to its host's party once per join, not to the host's next parties", "[online]") {
+  Player host(0x0009000000000901ull, "Host");
+  Player friend_(0x0009000000000902ull, "Friend");
+  host.net->Start({});
+  friend_.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return friend_.net->hub() == host.net->self(); }));
+
+  // Joined: taken to the host's party from its own lobby.
+  SessionInfo party_info, own_info;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x1000, kParty, 0, 8, 0, &party_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.sessions->FindById(party_info.xnkid).has_value(); }));
+  friend_.sessions->Create(0x3000, kParty, 0, 8, 0, &own_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.invites == 1; }));
+  friend_.sessions->Delete(0x3000);
+  SessionInfo joined = party_info;
+  friend_.sessions->Create(0x3001, kJoinedParty, 0, 8, 0, &joined, &nonce);
+
+  // The host leaves its party (a new one of its own at once), and the friend is back in its own lobby: not taken
+  // to the host's new party.
+  host.sessions->Delete(0x1000);
+  SessionInfo second_info;
+  host.sessions->Create(0x1001, kParty, 0, 8, 0, &second_info, &nonce);
+  friend_.sessions->Delete(0x3001);
+  friend_.sessions->Create(0x3002, kParty, 0, 8, 0, &own_info, &nonce);
+  REQUIRE(WaitFor([&] { return friend_.sessions->FindById(second_info.xnkid).has_value(); }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  CHECK(friend_.invites == 1);
+
+  // The friend joins the host again (Steam's "Join game", or its address): taken to its party once more.
+  friend_.net->SetHub({});
+  friend_.net->SetHub(host.endpoint);
+  REQUIRE(WaitFor([&] { return friend_.net->hub() == host.net->self(); }));
+  REQUIRE(WaitFor([&] { return friend_.invites == 2; }, 4000));
+  auto invite = friend_.sessions->accepted_invite();
+  REQUIRE(invite);
+  CHECK(invite->info.xnkid == second_info.xnkid);
+}

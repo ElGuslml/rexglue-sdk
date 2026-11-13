@@ -237,6 +237,10 @@ class SessionService {
   std::map<uint32_t, LocalSession> sessions_;
   std::map<uint64_t, std::vector<AdvertisedSession>> remote_;  // by the peer that hosts them
   std::set<std::array<uint8_t, kXnKidSize>> invited_;
+  // MaybeInvite takes a joiner to its hub's party once per join (VirtualNet::hub_joins): the join it served, and the
+  // party, until the game is told (an invite dropped as its party went lets the next party of the hub stand in).
+  uint64_t followed_join_ = 0;
+  std::optional<std::array<uint8_t, kXnKidSize>> followed_party_;
   std::optional<AcceptedInvite> accepted_invite_;
   // An invite accepted whose party is not known yet (an external invite: this game is joining the
   // inviter's group).
