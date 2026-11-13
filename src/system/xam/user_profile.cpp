@@ -40,6 +40,11 @@ REXCVAR_DEFINE_BOOL(online_steam, false, "Online",
                     "running this game in its friends list, invites, and Valve's relays, so no port "
                     "is opened. Steam runs in rexsteam.exe, next to the game, as app 480 "
                     "(Spacewar), which Steam shows to the friends");
+REXCVAR_DEFINE_BOOL(online_upnp, true, "Online",
+                    "Online play, hosting: ask the router (UPnP) to forward the UDP port (online_port) "
+                    "to this PC while the game runs, so friends over the internet can join; nothing is "
+                    "asked when the router's own internet address is private (carrier-grade NAT), "
+                    "which the log says. Off: the port is forwarded by hand, or not at all");
 REXCVAR_DEFINE_STRING(online_xuid, "", "Online",
                       "The online XUID to use instead of the profile's (16 hexadecimal digits), for "
                       "two instances of a game on one PC with copies of one profile. Empty: the "

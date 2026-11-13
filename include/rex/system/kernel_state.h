@@ -37,6 +37,7 @@
 #include <rex/system/xam/user_profile.h>
 #include <rex/system/online/session_service.h>
 #include <rex/system/online/steam_bridge.h>
+#include <rex/system/online/upnp.h>
 #include <rex/system/online/virtual_net.h>
 #include <rex/platform/dynlib.h>
 #include <rex/system/function_dispatcher.h>
@@ -371,6 +372,7 @@ class KernelState {
   std::unique_ptr<online::VirtualNet> online_net_;
   std::unique_ptr<online::SessionService> online_sessions_;
   online::SteamBridge* online_steam_ = nullptr;  // the network's transport
+  std::unique_ptr<online::upnp::PortMapping> online_upnp_;  // hosting, online_upnp
 
   rex::thread::global_critical_region global_critical_region_;
 

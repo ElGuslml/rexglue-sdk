@@ -19,6 +19,7 @@ add_executable(unit_tests
     system/virtual_net_test.cpp
     system/session_service_test.cpp
     system/steam_bridge_test.cpp
+    system/upnp_test.cpp
     input/input_assignment_test.cpp
     input/mnk_binds_test.cpp
     codegen/codegen_writer_test.cpp

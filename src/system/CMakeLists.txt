@@ -39,6 +39,7 @@ set(REXSYSTEM_SOURCES
     online/udp_transport.cpp
     online/session_service.cpp
     online/steam_bridge.cpp
+    online/upnp.cpp
 
     ppc_types.cpp
     elf_module.cpp

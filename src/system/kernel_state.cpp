@@ -31,6 +31,7 @@
 #include <chrono>
 #include <thread>
 
+#include <rex/filesystem.h>
 #include <rex/system/achievement_cache.h>
 #include <rex/system/flags.h>
 #include <rex/system/guest_path.h>
@@ -170,6 +171,7 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
 
 KernelState::~KernelState() {
   app_manager_.reset();
+  online_upnp_.reset();
   online_steam_ = nullptr;  // the network's transport
   online_net_.reset();
   online_sessions_.reset();
@@ -279,6 +281,11 @@ online::VirtualNet* KernelState::online_net() {
     REXSYS_INFO("Online play: UDP port {}, {}; this game is {}.{}.{}.{} to its friends", port,
                 hub.valid() ? "joining " + hub.ToString() : std::string("hosting"), ip >> 24,
                 (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+    // The host's port forwarded by its router while the game runs (its friends over the internet).
+    if (!hub.valid() && REXCVAR_GET(online_upnp)) {
+      online_upnp_ = std::make_unique<online::upnp::PortMapping>(
+          port, rex::filesystem::GetExecutablePath().stem().string() + " online play");
+    }
   });
   return online_net_.get();
 }
@@ -1049,6 +1056,11 @@ void KernelState::WaitForThreadsToExit(const std::vector<object_ref<XThread>>& t
 
 void KernelState::TerminateTitle() {
   REXSYS_DEBUG("KernelState::TerminateTitle");
+
+  // The router's forwarding removed now: the process may end without its destructors.
+  if (online_upnp_) {
+    online_upnp_->Release();
+  }
 
   constexpr uint32_t kCooperativeExitTimeoutMs = 200;
 
