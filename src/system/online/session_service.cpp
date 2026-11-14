@@ -184,16 +184,59 @@ void SessionService::TryDeliver() {
 }
 
 void SessionService::Tick() {
+  const auto now = std::chrono::steady_clock::now();
+  bool check_friends = false;
+  std::function<void()> friends_changed;
   {
     std::lock_guard lock(mutex_);
-    if (pending_invite_ &&
-        std::chrono::steady_clock::now() - pending_since_ > kPendingInviteTimeout) {
+    if (pending_invite_ && now - pending_since_ > kPendingInviteTimeout) {
       REXSYS_WARN("online: the party of the invite from {:016X} was never found; the invite is dropped",
                   pending_invite_->inviter);
       pending_invite_.reset();
     }
+    if (friends_changed_ && now - friends_checked_ >= kFriendsCheckInterval) {
+      friends_checked_ = now;
+      check_friends = true;
+      friends_changed = friends_changed_;
+    }
+  }
+  if (check_friends) {
+    std::vector<uint8_t> signature = FriendsSignature();
+    bool changed;
+    {
+      std::lock_guard lock(mutex_);
+      changed = signature != friends_signature_;
+      if (changed) {
+        friends_signature_ = std::move(signature);
+      }
+    }
+    if (changed) {
+      REXSYS_DEBUG("online: the friends list changed: the game is told");
+      friends_changed();
+    }
   }
   TryDeliver();
+}
+
+void SessionService::SetFriendsChanged(std::function<void()> changed) {
+  std::lock_guard lock(mutex_);
+  friends_changed_ = std::move(changed);
+}
+
+std::vector<uint8_t> SessionService::FriendsSignature() const {
+  std::vector<uint8_t> signature;
+  for (const Friend& f : Friends()) {
+    for (int i = 0; i < 8; ++i) {
+      signature.push_back(uint8_t(f.xuid >> (i * 8)));
+    }
+    signature.push_back(f.has_party ? 1 : 0);
+    if (f.has_party) {
+      signature.insert(signature.end(), f.party.xnkid.begin(), f.party.xnkid.end());
+    }
+    signature.insert(signature.end(), f.name.begin(), f.name.end());
+    signature.push_back(0);
+  }
+  return signature;
 }
 
 uint64_t SessionService::LocalUserXuid(uint32_t user_index) const {

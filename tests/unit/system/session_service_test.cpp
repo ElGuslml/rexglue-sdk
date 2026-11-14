@@ -286,6 +286,35 @@ TEST_CASE("A session's key is registered by its creation: its host is contacted"
   CHECK(lookup(party_info.xnkid) == kQosComplete);
 }
 
+TEST_CASE("The friends list's changes are told, as XN_FRIENDS_PRESENCE_CHANGED", "[online]") {
+  // Guitar Hero: Warriors of Rock reads its friends list once, and again on that notification.
+  Player host(0x0009000000000461ull, "Host");
+  std::atomic<int> changes = 0;
+  host.sessions->SetFriendsChanged([&] { ++changes; });
+  host.net->Start({});
+  std::this_thread::sleep_for(SessionService::kFriendsCheckInterval * 2);
+  CHECK(changes == 0);  // nobody yet: nothing to tell
+  auto friend_ = std::make_unique<Player>(0x0009000000000462ull, "Friend");
+  friend_->net->Start(host.endpoint);
+  // The friend connects.
+  REQUIRE(WaitFor([&] { return changes == 1; }));
+  // It hosts a party (advertised to the host).
+  SessionInfo party_info;
+  uint64_t nonce = 0;
+  friend_->sessions->Create(0x1000, kParty, 0, 8, 0, &party_info, &nonce);
+  REQUIRE(WaitFor([&] { return changes == 2; }));
+  auto friends = host.sessions->Friends();
+  REQUIRE(friends.size() == 1);
+  CHECK(friends[0].has_party);
+  // Nothing new: nothing told.
+  std::this_thread::sleep_for(SessionService::kFriendsCheckInterval * 2);
+  CHECK(changes == 2);
+  // It goes.
+  friend_.reset();
+  REQUIRE(WaitFor([&] { return changes == 3; }, 20000));
+  CHECK(host.sessions->Friends().empty());
+}
+
 TEST_CASE("An invite is told to the game once its gate has been open a second", "[online]") {
   Player host(0x0009000000000701ull, "Host");
   Player friend_(0x0009000000000702ull, "Friend");

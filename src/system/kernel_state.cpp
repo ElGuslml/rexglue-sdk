@@ -271,6 +271,9 @@ online::VirtualNet* KernelState::online_net() {
     online_sessions_ = std::make_unique<online::SessionService>(
         online_net_.get(), user_profile_->online_xuid(), user_profile_->name(),
         [this](uint32_t user_index) { BroadcastNotification(0x02000002, user_index); });
+    // The friends list changed (a friend connected or left, hosts or left a party): XN_FRIENDS_PRESENCE_CHANGED
+    // for the profile's user, as the console sends it.
+    online_sessions_->SetFriendsChanged([this] { BroadcastNotification(0x04000001, 0); });
     online_net_->Start(hub);
     if (online_steam_) {
       online_steam_->Attach(online_net_.get(), online_sessions_.get());

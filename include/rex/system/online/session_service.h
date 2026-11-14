@@ -193,6 +193,13 @@ class SessionService {
   static void SetDefaultInviteGate(std::function<bool()> gate);
   static constexpr auto kInviteGateSettle = std::chrono::seconds(1);
 
+  // Called (on the network thread) when the friends list (Friends()) changes: a friend connects or
+  // goes, hosts or leaves a party, or Steam lists another. A console tells the game with
+  // XN_FRIENDS_PRESENCE_CHANGED, and a game that keeps its list (Guitar Hero: Warriors of Rock reads
+  // it once and again on that notification) needs it. Looked at every kFriendsCheckInterval.
+  void SetFriendsChanged(std::function<void()> changed);
+  static constexpr auto kFriendsCheckInterval = std::chrono::milliseconds(500);
+
   // Decoding of an advertisement (tests).
   static std::vector<AdvertisedSession> DecodeSessions(const uint8_t* data, size_t size,
                                                        uint64_t owner);
@@ -251,6 +258,12 @@ class SessionService {
   bool deliver_ = false;
   uint32_t deliver_user_ = 0;
   std::chrono::steady_clock::time_point gate_open_since_{};
+  std::function<void()> friends_changed_;
+  std::vector<uint8_t> friends_signature_;
+  std::chrono::steady_clock::time_point friends_checked_{};
+
+  // The friends list as bytes, to tell a change.
+  std::vector<uint8_t> FriendsSignature() const;
 };
 
 }  // namespace rex::system::online
