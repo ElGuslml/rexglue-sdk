@@ -178,10 +178,36 @@ void CommandProcessor::InitializeShaderStorage(const std::filesystem::path& cach
                                                uint32_t title_id, bool blocking) {}
 
 void CommandProcessor::CallInThread(std::function<void()> fn) {
-  if (pending_fns_.empty() && system::XThread::IsInThread(worker_thread_.get())) {
+  if (system::XThread::IsInThread(worker_thread_.get()) && !HasPendingFns()) {
     fn();
-  } else {
+    return;
+  }
+  {
+    std::lock_guard lock(pending_fns_mutex_);
     pending_fns_.push(std::move(fn));
+  }
+  // The worker sleeps on this event while the ring is empty: it runs the function at once.
+  write_ptr_index_event_->Set();
+}
+
+bool CommandProcessor::HasPendingFns() {
+  std::lock_guard lock(pending_fns_mutex_);
+  return !pending_fns_.empty();
+}
+
+void CommandProcessor::RunPendingFns() {
+  for (;;) {
+    std::function<void()> fn;
+    {
+      std::lock_guard lock(pending_fns_mutex_);
+      if (pending_fns_.empty()) {
+        return;
+      }
+      fn = std::move(pending_fns_.front());
+      pending_fns_.pop();
+    }
+    // Run unlocked: a function may queue another one, or suspend this thread (Pause).
+    fn();
   }
 }
 
@@ -224,35 +250,24 @@ void CommandProcessor::WorkerThreadMain() {
   }
 
   while (worker_running_) {
-    while (!pending_fns_.empty()) {
-      auto fn = std::move(pending_fns_.front());
-      pending_fns_.pop();
-      fn();
-    }
+    RunPendingFns();
 
     uint32_t write_ptr_index = write_ptr_index_.load();
     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
-      // We've run out of commands to execute.
-      // We spin here waiting for new ones, as the overhead of waiting on our
-      // event is too high.
+      // We've run out of commands to execute: sleep until there are new ones. UpdateWritePointer, CallInThread
+      // and Shutdown set the event; the timeout only bounds a wait that nothing ends. (This spun 500 yields
+      // first, a core busy whenever the ring ran dry; upstream ReXGlue waits at once since ecf56926.)
       PrepareForWait();
-      uint32_t loop_count = 0;
       do {
-        // If we spin around too much, revert to a "low-power" state.
-        if (loop_count > 500) {
-          const int wait_time_ms = 5;
-          rex::thread::Wait(write_ptr_index_event_.get(), true,
-                            std::chrono::milliseconds(wait_time_ms));
-        }
-
-        rex::thread::MaybeYield();
-        loop_count++;
+        const int wait_time_ms = 5;
+        rex::thread::Wait(write_ptr_index_event_.get(), true,
+                          std::chrono::milliseconds(wait_time_ms));
         write_ptr_index = write_ptr_index_.load();
-      } while (worker_running_ && pending_fns_.empty() &&
+      } while (worker_running_ && !HasPendingFns() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
       ReturnFromWait();
-      if (!worker_running_ || !pending_fns_.empty()) {
+      if (!worker_running_ || HasPendingFns()) {
         continue;
       }
     }
@@ -1159,6 +1174,23 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
 
   bool is_memory = (wait_info & 0x10) != 0;
 
+  // The polls that only yielded (a short wait field, or vsync off) back off: 16 yields, then sleeps of 50 us and
+  // then kWaitRegMemPollInterval on the high-resolution timer, so a long wait stops keeping a core busy without
+  // noticing the value later than the usual poll does. Upstream ReXGlue (ecf56926) backs off up to 1 ms with its
+  // Sleep; here rex::thread::Sleep yields below 1 ms and sleeps whole milliseconds above, and a millisecond's poll
+  // cost frames (the usual poll's note above).
+  uint32_t attempts = 0;
+  const auto back_off = [&attempts] {
+    constexpr uint32_t kYields = 16;
+    if (attempts < kYields) {
+      rex::thread::MaybeYield();
+    } else {
+      rex::thread::PreciseSleep(
+          std::chrono::microseconds(attempts == kYields ? int64_t(50) : kWaitRegMemPollInterval));
+    }
+    ++attempts;
+  };
+
   bool matched = false;
   do {
     uint32_t value = 0;
@@ -1205,7 +1237,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
           // User wants it fast and dangerous.
-          rex::thread::MaybeYield();
+          back_off();
         } else {
           // The wait field is the GPU's poll interval in its own clocks: the console notices the
           // value within microseconds. Sleeping wait / 0x100 ms (1 ms, and Windows rounds it up)
@@ -1221,7 +1253,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
           return false;
         }
       } else {
-        rex::thread::MaybeYield();
+        back_off();
+        if (!worker_running_) {
+          return false;
+        }
       }
     }
   } while (!matched);

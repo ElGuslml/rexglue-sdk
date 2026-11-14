@@ -272,6 +272,10 @@ class CommandProcessor {
   std::atomic<bool> worker_running_;
   system::object_ref<system::XHostThread> worker_thread_;
 
+  // Functions for the worker thread to run, queued from any thread (CallInThread).
+  bool HasPendingFns();
+  void RunPendingFns();
+  std::mutex pending_fns_mutex_;
   std::queue<std::function<void()>> pending_fns_;
 
   // MicroEngine binary from PM4_ME_INIT
