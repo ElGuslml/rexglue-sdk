@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Online play's virtual network (rex/system/online/virtual_net.h): peers over real UDP sockets on
  * this PC (loopback), as two or three game processes would be.
  */
@@ -12,8 +12,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <rex/system/online/virtual_net.h>
+#include <rex/system/xsocket.h>
 
 using namespace rex::system::online;
+using rex::system::XObject;
+using rex::system::XSocket;
 
 namespace {
 
@@ -341,4 +344,18 @@ TEST_CASE("A connection the peer's game closes is lost here, its other session's
   CHECK(host.net->GetConnectStatus(b_match_in_host) == kConnectLost);
   b.net->Stop();
   host.net->Stop();
+}
+
+TEST_CASE("A socket's number is small and positive, and names its socket back", "[online]") {
+  // Demonware 2.3 (Guitar Hero: Warriors of Rock) takes a negative SOCKET for a failed socket().
+  for (uint32_t slot : {1u, 2u, 57u, 16383u, 1u << 20}) {
+    rex::X_HANDLE handle = XObject::kHandleBase + (slot << 2);
+    uint32_t number = XSocket::GuestNumber(handle);
+    CHECK(int32_t(number) > 0);
+    CHECK(XSocket::HandleFor(number) == handle);
+  }
+  // INVALID_SOCKET, 0 and numbers no socket has name no object.
+  CHECK(XSocket::HandleFor(0xFFFFFFFFu) == 0);
+  CHECK(XSocket::HandleFor(0) == 0);
+  CHECK(XSocket::HandleFor(0x08000000u) == 0);
 }

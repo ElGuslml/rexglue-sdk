@@ -73,6 +73,20 @@ class XSocket : public XObject, public online::PacketSink {
  public:
   static const XObject::Type kObjectType = XObject::Type::Socket;
 
+  // The SOCKET the game is given for a socket object: its handle less XObject::kHandleBase, a small
+  // positive number (4, 8, ...), as a console's XNet numbers its sockets; the socket functions take it
+  // back with HandleFor. Kernel handles (0xF8......) are negative as signed numbers, and Demonware 2.3
+  // takes a negative socket for a failed socket() (Guitar Hero: Warriors of Rock's bdSocket::create):
+  // its network layer never had a socket.
+  static constexpr uint32_t GuestNumber(X_HANDLE handle) { return handle - XObject::kHandleBase; }
+  // The handle of the socket the game names; anything that is not a socket number (INVALID_SOCKET,
+  // 0) gives a handle no object has.
+  static constexpr X_HANDLE HandleFor(uint32_t guest_number) {
+    return guest_number != 0 && guest_number < (0u - XObject::kHandleBase)
+               ? guest_number + XObject::kHandleBase
+               : 0;
+  }
+
   enum AddressFamily {
     X_AF_INET = 2,
   };
