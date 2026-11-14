@@ -144,8 +144,9 @@ class XSocket : public XObject, public online::PacketSink {
   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len);
 
   // Online play: a datagram socket of the virtual network (online::VirtualNet) instead of a real
-  // one: bound to a virtual port, its datagrams carried to and from the peers.
-  bool is_virtual() const { return virtual_net_ != nullptr; }
+  // one: bound to a virtual port, its datagrams carried to and from the peers. Without online play,
+  // a VDP socket is virtual with no network: bound, its datagrams go nowhere and none come.
+  bool is_virtual() const { return virtual_; }
   // The WSA error of a virtual socket's last failed call (WSAEWOULDBLOCK when nothing is waiting).
   uint32_t last_error() const { return last_error_; }
   // A virtual socket with a datagram waiting (select).
@@ -170,7 +171,8 @@ class XSocket : public XObject, public online::PacketSink {
   std::mutex incoming_packet_mutex_;
   std::queue<uint8_t*> incoming_packets_;
 
-  online::VirtualNet* virtual_net_ = nullptr;
+  bool virtual_ = false;
+  online::VirtualNet* virtual_net_ = nullptr;  // null for a virtual socket with no network
   bool nonblocking_ = false;
   uint32_t last_error_ = 0;
   std::condition_variable incoming_packet_cv_;

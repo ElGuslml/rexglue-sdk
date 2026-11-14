@@ -66,7 +66,16 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
   // players' games; no real port is taken.
   if (type == Type::X_SOCK_DGRAM) {
     if (online::VirtualNet* net = kernel_state_->online_net()) {
+      virtual_ = true;
       virtual_net_ = net;
+      return X_STATUS_SUCCESS;
+    }
+    // Without online play a VDP socket (Xbox Live's and system link's protocol) has nobody to reach:
+    // virtual with no network, as a console without a network, so no real port is taken. Guitar
+    // Hero: Warriors of Rock's network layer (bdNet) binds one on VDP port 1000 at every start; as a
+    // real UDP socket it opened port 1000 on the PC (and the firewall's question) for nothing.
+    if (proto == Protocol::X_IPPROTO_VDP) {
+      virtual_ = true;
       return X_STATUS_SUCCESS;
     }
   }
@@ -85,9 +94,11 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
-  if (virtual_net_) {
+  if (virtual_) {
     if (bound_) {
-      virtual_net_->Unbind(this, bound_port_);
+      if (virtual_net_) {
+        virtual_net_->Unbind(this, bound_port_);
+      }
       bound_ = false;
     }
     std::lock_guard<std::mutex> lock(incoming_packet_mutex_);
@@ -118,7 +129,7 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
     secure_ = false;
     return X_STATUS_SUCCESS;
   }
-  if (virtual_net_) {
+  if (virtual_) {
     if (level == 0xFFFF && optname == 0x0020) {
       broadcast_socket_ = true;
     }
@@ -140,7 +151,7 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
 }
 
 X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
-  if (virtual_net_) {
+  if (virtual_) {
     if (cmd == kFionbio) {
       nonblocking_ = memory::load_and_swap<uint32_t>(arg_ptr) != 0;
     } else if (cmd == kFionread) {
@@ -171,9 +182,9 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
 }
 
 X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
-  if (virtual_net_) {
+  if (virtual_) {
     uint16_t port = name->sin_port;
-    if (bound_ || !virtual_net_->Bind(this, &port)) {
+    if (bound_ || (virtual_net_ && !virtual_net_->Bind(this, &port))) {
       last_error_ = kWsaEaddrinuse;
       return X_STATUS_UNSUCCESSFUL;
     }
@@ -234,7 +245,7 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
                       uint32_t* from_len) {
-  if (virtual_net_) {
+  if (virtual_) {
     std::unique_lock<std::mutex> lock(incoming_packet_mutex_);
     if (incoming_packets_.empty()) {
       if (nonblocking_) {
@@ -317,10 +328,14 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
                     uint32_t to_len) {
-  if (virtual_net_) {
+  if (virtual_) {
     if (!to) {
       last_error_ = kWsaEhostunreach;
       return -1;
+    }
+    if (!virtual_net_) {
+      // No network: the datagram goes nowhere, as one sent where nobody listens.
+      return int(buf_len);
     }
     if (!bound_) {
       // A socket sending before bind() gets a port, as a real one.
