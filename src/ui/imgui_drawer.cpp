@@ -104,6 +104,7 @@ ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallb
 ImGuiDrawer::~ImGuiDrawer() {
   SetPresenter(nullptr);
   SetWindowTextInputActive(false);
+  window_->SetCursorAutoHideHold(false);
   if (!dialogs_.empty()) {
     window_->RemoveInputListener(this);
     if (internal_state_) {
@@ -505,6 +506,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
     io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
   }
 
+  // An overlay under the mouse that takes it (the quit prompt, the settings): the cursor stays visible over it when
+  // it auto-hides (cursor_auto_hide).
+  window_->SetCursorAutoHideHold(io.WantCaptureMouse);
+
   // Detaching is deferred if the last dialog is removed during drawing, perform
   // it now if needed.
   DetachIfLastDialogRemoved();
@@ -777,6 +782,8 @@ void ImGuiDrawer::DetachIfLastDialogRemoved() {
   // Detaching stops Draw, so there is no later frame to notice that the
   // removed dialog took a focused InputText with it.
   SetWindowTextInputActive(false);
+  // No overlay left to hold the cursor visible.
+  window_->SetCursorAutoHideHold(false);
   if (presenter_) {
     presenter_->RemoveUIDrawerFromUIThread(this);
   }

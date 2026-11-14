@@ -34,6 +34,8 @@ REXCVAR_DECLARE(int32_t, window_height);
 REXCVAR_DECLARE(bool, fullscreen);
 REXCVAR_DECLARE(bool, fullscreen_exclusive);
 REXCVAR_DECLARE(int32_t, monitor);
+REXCVAR_DECLARE(bool, cursor_auto_hide);
+REXCVAR_DECLARE(int32_t, cursor_auto_hide_ms);
 REXCVAR_DECLARE(std::string, video_driver);
 
 // Display (guest video mode; defined in src/ui/window.cpp)

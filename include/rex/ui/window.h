@@ -347,6 +347,10 @@ class Window {
   // Idle time before kAutoHidden hides the cursor. Takes effect the next time
   // the auto-hide timer is armed (the next mouse motion).
   void SetCursorAutoHideDelayMs(uint32_t delay_ms) { cursor_auto_hide_delay_ms_ = delay_ms; }
+  // While held, a kAutoHidden cursor stays visible: an overlay under the mouse that takes it (ImGuiDrawer, from
+  // ImGui's WantCaptureMouse). Released, it hides again after the delay.
+  void SetCursorAutoHideHold(bool hold);
+  bool GetCursorAutoHideHold() const { return cursor_auto_hide_hold_; }
 
   bool HasFocus() const { return HasActualState() ? has_focus_ : false; }
   // May be applied in a delayed way or dropped at all, HasFocus will not
@@ -558,6 +562,7 @@ class Window {
   virtual void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) {
     (void)old_cursor_visibility;
   }
+  virtual void ApplyNewCursorAutoHideHold() {}
   // If state can be applied, this is called to request bringing the window into
   // focus (and once that's done by the OS, update the actual focus state). Does
   // nothing otherwise (focus can't be requested before the window is open, a
@@ -738,6 +743,7 @@ class Window {
   CursorVisibility cursor_visibility_ = CursorVisibility::kVisible;
 
   uint32_t cursor_auto_hide_delay_ms_ = kDefaultCursorAutoHideMilliseconds;
+  bool cursor_auto_hide_hold_ = false;
 
   bool has_focus_ = false;
 

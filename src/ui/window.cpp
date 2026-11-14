@@ -39,6 +39,15 @@ REXCVAR_DEFINE_BOOL(fullscreen_exclusive, false, "UI/Window",
                     "Switch the display mode in fullscreen instead of going "
                     "borderless at the desktop mode");
 
+REXCVAR_DEFINE_BOOL(cursor_auto_hide, false, "UI/Window",
+                    "Hide the mouse cursor over the game window while it is not moved (cursor_auto_hide_ms); it "
+                    "shows again when moved, while the window does not have the focus, and over an overlay that "
+                    "takes the mouse");
+
+REXCVAR_DEFINE_INT32(cursor_auto_hide_ms, 2000, "UI/Window",
+                     "With cursor_auto_hide: the milliseconds without moving the mouse before the cursor hides")
+    .range(250, 60000);
+
 REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
                      "Monitor index to display on (0 = default, 1 = primary, 2 = "
                      "second monitor, etc.)")
@@ -463,6 +472,16 @@ void Window::SetTextInputActive(bool active) {
   ApplyNewTextInputActive();
   if (destruction_receiver.IsWindowDestroyedOrStateInapplicable()) {
     return;
+  }
+}
+
+void Window::SetCursorAutoHideHold(bool hold) {
+  if (cursor_auto_hide_hold_ == hold) {
+    return;
+  }
+  cursor_auto_hide_hold_ = hold;
+  if (CanApplyState()) {
+    ApplyNewCursorAutoHideHold();
   }
 }
 

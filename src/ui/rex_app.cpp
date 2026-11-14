@@ -490,6 +490,11 @@ bool ReXApp::SetupPresentation() {
     window_->SetFullscreen(true);
   }
   window_->SetMonitor(REXCVAR_GET(monitor));
+  // The cursor hidden over the game while the mouse is not moved (most games played with a controller do so).
+  if (REXCVAR_GET(cursor_auto_hide)) {
+    window_->SetCursorAutoHideDelayMs(uint32_t(REXCVAR_GET(cursor_auto_hide_ms)));
+    window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kAutoHidden);
+  }
 
   auto on_window_cvar = [this](const char* name, std::function<void(std::string_view)> apply) {
     rex::cvar::RegisterChangeCallback(

@@ -52,7 +52,10 @@ Uint32 CursorAutoHideTimerCallback(void* userdata, SDL_TimerID timer_id, Uint32 
   (void)interval;
   auto* window = static_cast<WindowSDL*>(userdata);
   window->app_context().CallInUIThreadDeferred([window] {
-    if (window->GetCursorVisibility() == Window::CursorVisibility::kAutoHidden) {
+    // Over the window only (Windows shows its own cursor elsewhere), while the game has the focus and no overlay
+    // under the mouse takes it.
+    if (window->GetCursorVisibility() == Window::CursorVisibility::kAutoHidden && window->HasFocus() &&
+        !window->GetCursorAutoHideHold()) {
       SDL_HideCursor();
     }
   });
@@ -401,9 +404,40 @@ void WindowSDL::ApplyCursorVisibilityNow() {
     case CursorVisibility::kAutoHidden:
       // Hide immediately (see the contract in window.h: switching to
       // kAutoHidden hides instantly, e.g. when entering fullscreen); the
-      // mouse-motion handler reveals the cursor and re-arms the timer.
-      SDL_HideCursor();
+      // mouse-motion handler reveals the cursor and re-arms the timer. Not while another window has the focus or an
+      // overlay holds it: then it shows, and hides after the delay once that ends.
+      if (HasFocus() && !GetCursorAutoHideHold()) {
+        CancelCursorAutoHideTimer();
+        SDL_HideCursor();
+      } else {
+        CancelCursorAutoHideTimer();
+        SDL_ShowCursor();
+      }
       break;
+  }
+}
+
+void WindowSDL::ApplyNewCursorAutoHideHold() {
+  if (GetCursorVisibility() != CursorVisibility::kAutoHidden) {
+    return;
+  }
+  if (GetCursorAutoHideHold()) {
+    CancelCursorAutoHideTimer();
+    SDL_ShowCursor();
+  } else {
+    RevealCursorForAWhile();
+  }
+}
+
+void WindowSDL::RevealCursorForAWhile() {
+  SDL_ShowCursor();
+  RearmCursorAutoHideTimer();
+}
+
+void WindowSDL::CancelCursorAutoHideTimer() {
+  if (cursor_hide_timer_) {
+    SDL_RemoveTimer(cursor_hide_timer_);
+    cursor_hide_timer_ = 0;
   }
 }
 
@@ -524,9 +558,20 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
     }
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
       OnFocusUpdate(true, destruction_receiver);
+      if (!destruction_receiver.IsWindowDestroyed() &&
+          GetCursorVisibility() == CursorVisibility::kAutoHidden) {
+        // Back to the game: the cursor where it was, hidden after the delay.
+        RevealCursorForAWhile();
+      }
       break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
       OnFocusUpdate(false, destruction_receiver);
+      if (!destruction_receiver.IsWindowDestroyed() &&
+          GetCursorVisibility() == CursorVisibility::kAutoHidden) {
+        // Another window has the focus: the cursor stays visible over the game.
+        CancelCursorAutoHideTimer();
+        SDL_ShowCursor();
+      }
       break;
     case SDL_EVENT_WINDOW_EXPOSED:
       // The platform cannot retain the previous image; force the paint.

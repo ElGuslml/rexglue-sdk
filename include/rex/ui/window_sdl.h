@@ -57,6 +57,7 @@ class WindowSDL final : public Window {
   void ApplyNewMouseCapture() override;
   void ApplyNewMouseRelease() override;
   void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) override;
+  void ApplyNewCursorAutoHideHold() override;
   void ApplyNewTextInputActive() override;
   void FocusImpl() override;
 
@@ -89,6 +90,9 @@ class WindowSDL final : public Window {
   std::atomic<bool> paint_pending_{false};
   // Auto-hide cursor bookkeeping (CursorVisibility::kAutoHidden).
   SDL_TimerID cursor_hide_timer_ = 0;
+  // Shows the cursor and hides it after the delay (if it may then: kAutoHidden, the focus, no hold).
+  void RevealCursorForAWhile();
+  void CancelCursorAutoHideTimer();
 };
 
 }  // namespace rex::ui
