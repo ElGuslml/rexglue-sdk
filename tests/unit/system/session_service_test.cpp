@@ -6,7 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -240,6 +242,48 @@ TEST_CASE("A ranked session is made a player match", "[online]") {
   auto details = host.sessions->Details(0x2000);
   REQUIRE(details);
   CHECK(details->flags == kGame);
+}
+
+TEST_CASE("A session's key is registered by its creation: its host is contacted", "[online]") {
+  // Guitar Hero: Warriors of Rock never calls XNetRegisterKey; a friend joining its party needs the host contacted.
+  Player host(0x0009000000000451ull, "Host");
+  Player friend_(0x0009000000000452ull, "Friend");
+  host.net->Start({});
+  friend_.net->Start(host.endpoint);
+  REQUIRE(WaitFor([&] { return friend_.net->hub() == host.net->self(); }));
+  SessionInfo party_info;
+  uint64_t nonce = 0;
+  host.sessions->Create(0x1000, kParty, 0, 8, 0, &party_info, &nonce);
+
+  XNADDR host_addr{};
+  host.net->GetTitleXnAddr(&host_addr);
+  std::mutex mutex;
+  std::vector<QosResult> results;
+  auto lookup = [&](const std::array<uint8_t, kXnKidSize>& xnkid) {
+    {
+      std::lock_guard lock(mutex);
+      results.clear();
+    }
+    friend_.net->QosLookup({{host_addr, xnkid}}, 1, [&](size_t, const QosResult& result) {
+      std::lock_guard lock(mutex);
+      results.push_back(result);
+    });
+    REQUIRE(WaitFor([&] {
+      std::lock_guard lock(mutex);
+      return results.size() == 1;
+    }));
+    std::lock_guard lock(mutex);
+    return results[0].flags;
+  };
+  CHECK(lookup(party_info.xnkid) == (kQosComplete | kQosTargetContacted));
+  // Another session's key: never contacted.
+  std::array<uint8_t, kXnKidSize> other = party_info.xnkid;
+  other[7] ^= 0xFF;
+  CHECK(lookup(other) == kQosComplete);
+  // The game unregisters the key after deleting the session (Warriors of Rock does): unknown again.
+  host.sessions->Delete(0x1000);
+  host.net->UnregisterKey(party_info.xnkid.data());
+  CHECK(lookup(party_info.xnkid) == kQosComplete);
 }
 
 TEST_CASE("An invite is told to the game once its gate has been open a second", "[online]") {

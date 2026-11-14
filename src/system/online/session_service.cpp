@@ -250,6 +250,12 @@ void SessionService::Create(uint32_t obj, uint32_t flags, uint32_t user_index, u
     session.info = *info;
   }
   *nonce = session.nonce;
+  // XSessionCreate registers the session's key with XNet, as the XDK's later session library does: Guitar Hero:
+  // Warriors of Rock never calls XNetRegisterKey (it does not import it; it unregisters the key itself when it deletes
+  // the session). Unregistered, the key's QoS probes were answered as an unknown session, and a friend's join, which
+  // needs the party's host contacted, failed with "the session is no longer available". A game that also registers
+  // it (Guitar Hero: Metallica) only registers it again.
+  net_->RegisterKey(session.info.xnkid.data(), session.info.xnkey.data());
   REXSYS_INFO("online: session {:08X} created ({}), flags {:08X}, {} + {} slots, id {}", obj,
               session.host ? "host" : "joined", flags, max_public, max_private,
               KidText(session.info.xnkid));
