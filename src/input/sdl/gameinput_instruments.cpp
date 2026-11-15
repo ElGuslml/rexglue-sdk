@@ -16,6 +16,7 @@
 #include <GameInput.h>
 
 #include <cstdio>
+#include <string>
 
 namespace rex::input::sdl::gameinput {
 
@@ -131,6 +132,64 @@ std::optional<uint8_t> ReadGuitarTilt(void* device) {
   }
   reading->Release();
   return tilt;
+}
+
+namespace {
+
+// SDL's raw types (SDL_gameinputjoystick.cpp, GAMEINPUT_GetDeviceRawType; the IDs of its usb_ids.h).
+bool IsRawInstrument(uint16_t vendor, uint16_t product) {
+  switch (vendor) {
+    case 0x0738:  // Mad Catz: the Stratocaster, the drum kit, the legacy adapter
+      return product == 0x4161 || product == 0x4262 || product == 0x4164;
+    case 0x0E6F:  // PDP: the Jaguar, the Riffmaster, the drum kit
+      return product == 0x0170 || product == 0x0248 || product == 0x0171;
+    case 0x3651:  // CRKD: the Stage Tour guitar
+      return product == 0x4161;
+    case 0x1430:  // RedOctane: the Guitar Hero Live guitar
+      return product == 0x0170;
+    case 0x3958:  // RedOctane Games: the Stage Tour guitar and drums
+      return product == 0x4161 || product == 0xD300;
+    default:
+      return false;
+  }
+}
+
+struct RawInstruments {
+  int count = 0;
+  std::string names;
+};
+
+void CALLBACK OnRawDevice(GameInputCallbackToken, void* context, IGameInputDevice* device, uint64_t,
+                          GameInputDeviceStatus current, GameInputDeviceStatus) {
+  const GameInputDeviceInfo* info = nullptr;
+  if (!(current & GameInputDeviceConnected) || !device || FAILED(device->GetDeviceInfo(&info)) || !info ||
+      !(info->supportedInput & GameInputKindRawDeviceReport) || !IsRawInstrument(info->vendorId, info->productId)) {
+    return;
+  }
+  auto* found = static_cast<RawInstruments*>(context);
+  char ids[16];
+  std::snprintf(ids, sizeof(ids), "%04X:%04X", info->vendorId, info->productId);
+  found->names += std::string(found->count ? ", " : "") + ids + (info->displayName ? std::string(" ") + info->displayName : "");
+  ++found->count;
+}
+
+}  // namespace
+
+int CountRawInstruments(std::string* names) {
+  if (!g_game_input) {
+    return 0;
+  }
+  // The devices connected now, each given to the callback before RegisterDeviceCallback returns.
+  RawInstruments found;
+  GameInputCallbackToken token = 0;
+  if (SUCCEEDED(g_game_input->RegisterDeviceCallback(nullptr, GameInputKindRawDeviceReport, GameInputDeviceConnected,
+                                                     GameInputBlockingEnumeration, &found, OnRawDevice, &token))) {
+    g_game_input->UnregisterCallback(token);
+  }
+  if (names) {
+    *names = found.names;
+  }
+  return found.count;
 }
 
 }  // namespace rex::input::sdl::gameinput

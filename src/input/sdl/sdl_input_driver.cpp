@@ -72,7 +72,8 @@ REXCVAR_DEFINE_BOOL(
     "Xbox One guitars and drum kits that are neither XInput nor HID devices (GIP instruments such as the PDP "
     "Riffmaster, the PDP Jaguar or the Mad Catz Stratocaster) read through GameInput's raw reports, which needs the "
     "Microsoft GameInput redistributable, version 3 or newer (Windows). A guitar's tilt is then its report's byte "
-    "(gip in gamepad_tilt_calibration). False: they go unread");
+    "(gip in gamepad_tilt_calibration). Only while one is connected as the controllers start (with GameInput's "
+    "raw reports on, SDL also takes Xbox 360 instruments through GameInput, as gamepads). False: they go unread");
 REXCVAR_DEFINE_STRING(gamepad_ignore, "", "Input",
                       "Controllers this game leaves alone, for another program or a second instance of a game on "
                       "this PC: entries separated by commas, each a serial number, an SDL GUID (as the log's "
@@ -732,19 +733,30 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
       }
 #if defined(_WIN32)
       // Xbox One guitars and drum kits: SDL reads them through GameInput's raw reports (on by default with GameInput's
-      // API 3, thirdparty/gameinput), a guitar's tilt through this driver's own GameInput.
+      // API 3, thirdparty/gameinput), a guitar's tilt through this driver's own GameInput. Only while one is connected
+      // as the controllers start: with the raw reports on, SDL's GameInput driver, which comes before its XInput one,
+      // also takes Xbox 360 instruments and controllers, as gamepads (an X-plorer guitar connected before the start
+      // came as a controller, played on Guitar Hero III's layout with two frets held) or as well as XInput (a wireless
+      // guitar in two slots, its IDs differing between the two: every strum moved a menu twice).
+      std::string status;
       if (!REXCVAR_GET(gamepad_gameinput)) {
         SDL_SetHint(SDL_HINT_JOYSTICK_GAMEINPUT_RAW, "0");
         REXLOG_INFO("GameInput: off (gamepad_gameinput): Xbox One guitars and drum kits go unread.");
+      } else if (!gameinput::Start(status)) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_GAMEINPUT_RAW, "0");
+        REXLOG_INFO("GameInput 3 not available ({}): Xbox One guitars and drum kits (such as the PDP Riffmaster) "
+                    "need the Microsoft GameInput redistributable.",
+                    status);
       } else {
-        std::string status;
-        if (gameinput::Start(status)) {
-          REXLOG_INFO("GameInput 3: on: Xbox One guitars and drum kits (such as the PDP Riffmaster) are read through "
-                      "it.");
+        std::string names;
+        if (const int instruments = gameinput::CountRawInstruments(&names); instruments > 0) {
+          REXLOG_INFO("GameInput 3: on: its raw reports for the Xbox One instruments connected ({}: {}).",
+                      instruments, names);
         } else {
-          REXLOG_INFO("GameInput 3 not available ({}): Xbox One guitars and drum kits (such as the PDP Riffmaster) "
-                      "need the Microsoft GameInput redistributable.",
-                      status);
+          SDL_SetHint(SDL_HINT_JOYSTICK_GAMEINPUT_RAW, "0");
+          REXLOG_INFO("GameInput 3: on, but no Xbox One guitar or drum kit is connected: its raw reports stay off, so "
+                      "that Xbox 360 instruments and controllers are XInput's (an Xbox One guitar connected later is "
+                      "read from the next start).");
         }
       }
 #endif

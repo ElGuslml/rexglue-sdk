@@ -31,6 +31,13 @@ void CloseDevice(void* device);
 // A Rock Band 4 guitar's tilt, its raw report's third byte, if the device has a reading.
 std::optional<uint8_t> ReadGuitarTilt(void* device);
 
+// The Xbox One instruments connected now that SDL reads through GameInput's raw reports (SDL_gameinputjoystick.cpp's
+// GAMEINPUT_GetDeviceRawType: the Rock Band 4 guitars and drum kits, the Mad Catz legacy adapter, the Guitar Hero Live
+// guitar), each "vendor:product name" in `names`, comma-separated; 0 without GameInput. SDL's raw reports are for them
+// only: with them on, SDL's GameInput driver, ahead of its XInput one, also takes Xbox 360 instruments and controllers,
+// as gamepads (a guitar's XInput subtype lost) or as well as XInput (one guitar in two slots).
+int CountRawInstruments(std::string* names);
+
 #else
 
 inline bool Start(std::string& status) {
@@ -44,6 +51,9 @@ inline void* OpenDevice(const char*) {
 inline void CloseDevice(void*) {}
 inline std::optional<uint8_t> ReadGuitarTilt(void*) {
   return std::nullopt;
+}
+inline int CountRawInstruments(std::string*) {
+  return 0;
 }
 
 #endif
