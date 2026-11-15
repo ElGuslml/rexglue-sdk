@@ -21,6 +21,9 @@ uint16_t TapControlBits(std::string_view list);
 /// null, the default: always. It runs on the thread that reads the pad, at each read.
 void SetTapGateFunction(bool (*gate)());
 
+/// The gate, asked now: true without one.
+bool TapGateOpen();
+
 /// One device's taps: `target` pressed for `hold_ms` when one of `sources` is pressed, the sources pressed within
 /// `window_ms` of the first making one press (a chord, one strum), which comes when the window ends; the target is
 /// then released at least 20 ms, so that a game reading the pad once a frame sees each press. While the target is

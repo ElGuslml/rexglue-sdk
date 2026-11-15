@@ -26,6 +26,11 @@ void SetTapGateFunction(bool (*gate)()) {
   g_tap_gate.store(gate, std::memory_order_release);
 }
 
+bool TapGateOpen() {
+  bool (*gate)() = g_tap_gate.load(std::memory_order_acquire);
+  return !gate || gate();
+}
+
 uint16_t TapControlBits(std::string_view list) {
   struct Name {
     std::string_view name;

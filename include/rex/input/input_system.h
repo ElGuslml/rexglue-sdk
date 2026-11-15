@@ -93,6 +93,9 @@ class InputSystem : public system::IInputSystem {
   /// the keyboard's pad). Its id is DeviceId::kInvalid when the user has no device. A copy, as the guest's last read
   /// left the list of devices. Any thread.
   DeviceInfo GetActiveDevice(uint32_t user_index);
+  /// Whether the device that speaks for the user (GetActiveDevice's) plays on Guitar Hero III's controller layout
+  /// (gamepad_guitar_layout = "gh3"): a game's hooks then choose its own controller code for it. Any thread.
+  bool PlaysGh3Layout(uint32_t user_index);
 
   std::bitset<kMaxGuestUsers> GetConnectedUsers() const { return connected_users_; }
   /// Guest user whose device most recently produced a button press.
@@ -118,9 +121,12 @@ class InputSystem : public system::IInputSystem {
   bool MakePrimary(uint32_t user_index);
   void AdjustDeadzoneLevels(uint32_t user_index, X_INPUT_GAMEPAD* gamepad) const;
   /// A gamepad, or the keyboard's pad, that the game is told is a guitar, read as one: its whammy bar at rest while
-  /// the right stick is (gamepad_whammy_rest), and its frets strumming as they are pressed (gamepad_tap_target).
+  /// the right stick is (gamepad_whammy_rest), and its frets strumming as they are pressed (gamepad_tap_target); one
+  /// on Guitar Hero III's layout (Gh3LayoutDevice) as it is.
   /// True when its right stick's X is then a whammy bar at rest at -32768 (a real guitar's too), for the merge.
   bool PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad);
+  /// gamepad_guitar_layout = "gh3" and a real gamepad the game is told is a guitar.
+  static bool Gh3LayoutDevice(const DeviceInfo& device);
   X_INPUT_VIBRATION ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const;
 
   rex::ui::Window* window_ = nullptr;
@@ -185,5 +191,7 @@ bool TakeDeviceKindChange(uint32_t user_index);
 /// The runtime's InputSystem::GetActiveDevice, for a game's hooks; a DeviceInfo with an invalid id without an input
 /// system.
 DeviceInfo GetActiveDevice(uint32_t user_index);
+/// The runtime's InputSystem::PlaysGh3Layout, for a game's hooks; false without an input system.
+bool PlaysGh3Layout(uint32_t user_index);
 
 }  // namespace rex::input

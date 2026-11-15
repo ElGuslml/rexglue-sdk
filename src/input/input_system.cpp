@@ -71,6 +71,16 @@ REXCVAR_DEFINE_STRING(gamepad_tap_target, "", "Input",
                       "Empty: off");
 REXCVAR_DEFINE_STRING(gamepad_tap_sources, "", "Input",
                       "The controls whose press presses gamepad_tap_target, comma-separated (a,b,y,x,lb)");
+REXCVAR_DEFINE_STRING(gamepad_guitar_layout, "guitar", "Input",
+                      "How a gamepad the game is told is a guitar (gamepad_subtype, gamepad_device_subtypes) plays: "
+                      "guitar = an Xbox 360 guitar's controls (frets A, B, Y, X and LB, strum on the D-pad, the "
+                      "whammy bar on the right stick's X, the tilt on its Y); gh3 = Guitar Hero III's controller "
+                      "layout, played by the game's own controller code, which a game's hooks choose for it "
+                      "(rex::input::PlaysGh3Layout; Guitar Hero: World Tour's engine and later kept it): frets on LT, "
+                      "LB, RB, RT and A, a fret pressed plays, Star Power on the D-pad, the whammy bar on either "
+                      "stick. Such a gamepad then reaches the game as it is (no whammy bar made of its stick, no "
+                      "tap). Real guitars, drum kits, the keyboard's pad and a gamepad with a calibrated whammy bar "
+                      "keep theirs");
 REXCVAR_DEFINE_BOOL(gamepad_whammy_rest, false, "Input",
                     "A gamepad, or the keyboard's pad, that the game is told is a guitar: its right stick's X "
                     "axis is the whammy bar, at rest (-32768) while the stick is centred and fully pressed at "
@@ -463,6 +473,26 @@ DeviceInfo InputSystem::GetActiveDevice(uint32_t user_index) {
   return info ? *info : DeviceInfo{};
 }
 
+bool InputSystem::Gh3LayoutDevice(const DeviceInfo& device) {
+  // A real controller the game is told is a guitar (not a real guitar, a drum kit, the keyboard's pad or a controller
+  // set to sing or play drums), and not a guitar SDL takes for a controller (its whammy bar found resting or
+  // calibrated).
+  return EqualsIgnoringCase(REXCVAR_GET(gamepad_guitar_layout), "gh3") && !device.synthetic &&
+         device.subtype == XINPUT_DEVSUBTYPE_GAMEPAD && !device.whammy_bar &&
+         IsGuitarSubtype(ReportedSubtype(&device, device.subtype));
+}
+
+bool InputSystem::PlaysGh3Layout(uint32_t user_index) {
+  std::lock_guard lock(mutex_);
+  if (user_index >= kMaxGuestUsers || !assignment_) {
+    return false;
+  }
+  // The device that speaks for the user now: the keyboard's pad, which shares user 0 with the first controller, plays
+  // as a guitar while it is the one in the player's hands.
+  const DeviceInfo* info = DeviceInfoFor(ChooseDeviceForUser(user_index));
+  return info && Gh3LayoutDevice(*info);
+}
+
 bool InputSystem::PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad) {
   const bool whammy_rest = REXCVAR_GET(gamepad_whammy_rest);
   if (device.subtype != XINPUT_DEVSUBTYPE_GAMEPAD) {
@@ -470,6 +500,11 @@ bool InputSystem::PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepa
     return whammy_rest && IsGuitarSubtype(device.subtype);
   }
   if (!IsGuitarSubtype(ReportedSubtype(&device, device.subtype))) {
+    return false;
+  }
+  // Guitar Hero III's controller layout: the game plays the controller on its own controller code (its hooks ask
+  // PlaysGh3Layout), which reads the triggers, the bumpers, A and B, the D-pad and the sticks as they are.
+  if (Gh3LayoutDevice(device)) {
     return false;
   }
   // The whammy bar: a guitar's rests at -32768 and the game reads the axis from there (Guitar Hero: Metallica takes
@@ -947,6 +982,15 @@ void SetPrimaryPressWindow(bool open) {
   if (auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system())) {
     input->SetPrimaryPressWindow(open);
   }
+}
+
+bool PlaysGh3Layout(uint32_t user_index) {
+  auto* kernel_state = REX_KERNEL_STATE();
+  if (!kernel_state || !kernel_state->emulator()) {
+    return false;
+  }
+  auto* input = static_cast<InputSystem*>(kernel_state->emulator()->input_system());
+  return input && input->PlaysGh3Layout(user_index);
 }
 
 bool TakeDeviceKindChange(uint32_t user_index) {
