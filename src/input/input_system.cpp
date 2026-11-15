@@ -82,6 +82,10 @@ REXCVAR_DEFINE_STRING(gamepad_guitar_layout, "guitar", "Input",
                       "tap), and in a song (the game's tap gate open) on its own buttons for songs, apart from the "
                       "menus' (gamepad_song_binds). Real guitars, drum kits, the keyboard's pad and a gamepad with a "
                       "calibrated whammy bar keep theirs");
+REXCVAR_DEFINE_STRING(gamepad_device_guitar_layout, "", "Input",
+                      "gamepad_guitar_layout for particular gamepads: controller=gh3 or controller=guitar entries "
+                      "separated by commas, a controller named as in gamepad_device_subtypes (its serial number, or "
+                      "else its SDL GUID). One not named plays on gamepad_guitar_layout's. A launcher writes it");
 REXCVAR_DEFINE_BOOL(gamepad_whammy_rest, false, "Input",
                     "A gamepad, or the keyboard's pad, that the game is told is a guitar: its right stick's X "
                     "axis is the whammy bar, at rest (-32768) while the stick is centred and fully pressed at "
@@ -176,6 +180,35 @@ DeviceKind DeviceKindSetting(const DeviceInfo& device) {
     }
     if (!device.guid.empty() && EqualsIgnoringCase(key, device.guid)) {
       by_guid = kind;
+    }
+  }
+  return by_guid;
+}
+
+// The layout gamepad_device_guitar_layout gives a device ("gh3", "guitar"), or empty when it does not name it: its
+// serial number's entry, else its GUID's.
+std::string_view DeviceGuitarLayout(const DeviceInfo& device) {
+  const std::string& text = REXCVAR_GET(gamepad_device_guitar_layout);
+  std::string_view by_guid;
+  size_t start = 0;
+  while (start < text.size()) {
+    size_t end = text.find(',', start);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    const std::string_view entry(text.data() + start, end - start);
+    start = end + 1;
+    const size_t equals = entry.rfind('=');
+    if (equals == std::string_view::npos || device.synthetic) {
+      continue;
+    }
+    const std::string_view key = Trim(entry.substr(0, equals));
+    const std::string_view value = Trim(entry.substr(equals + 1));
+    if (!device.serial.empty() && EqualsIgnoringCase(key, device.serial)) {
+      return value;
+    }
+    if (!device.guid.empty() && EqualsIgnoringCase(key, device.guid)) {
+      by_guid = value;
     }
   }
   return by_guid;
@@ -478,7 +511,11 @@ bool InputSystem::Gh3LayoutDevice(const DeviceInfo& device) {
   // A real controller the game is told is a guitar (not a real guitar, a drum kit, the keyboard's pad or a controller
   // set to sing or play drums), and not a guitar SDL takes for a controller (its whammy bar found resting or
   // calibrated).
-  return EqualsIgnoringCase(REXCVAR_GET(gamepad_guitar_layout), "gh3") && !device.synthetic &&
+  // Its own layout (gamepad_device_guitar_layout: a guitar through an adapter that Windows sees as a gamepad plays as
+  // a guitar while the others play as controllers), else every gamepad's.
+  const std::string_view own = DeviceGuitarLayout(device);
+  const std::string_view layout = own.empty() ? std::string_view(REXCVAR_GET(gamepad_guitar_layout)) : own;
+  return EqualsIgnoringCase(layout, "gh3") && !device.synthetic &&
          device.subtype == XINPUT_DEVSUBTYPE_GAMEPAD && !device.whammy_bar &&
          IsGuitarSubtype(ReportedSubtype(&device, device.subtype));
 }
