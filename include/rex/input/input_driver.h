@@ -38,6 +38,12 @@ class InputDriver {
   virtual void EnumerateDevices(std::vector<DeviceInfo>& out) = 0;
 
   virtual X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) = 0;
+  /// The device's state in a song, for a controller the game plays on Guitar Hero III's layout: only the controls
+  /// that layout reads, each on the inputs the player gave it for songs (the SDL driver's gamepad_song_binds), apart
+  /// from the menus' layout. A driver without them gives its state.
+  virtual X_RESULT GetDeviceSongState(DeviceId id, X_INPUT_STATE* out_state) {
+    return GetDeviceState(id, out_state);
+  }
   virtual X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                          X_INPUT_CAPABILITIES* out_caps) = 0;
   virtual X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) = 0;

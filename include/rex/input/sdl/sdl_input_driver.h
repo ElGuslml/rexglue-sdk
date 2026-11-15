@@ -38,6 +38,7 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
+  X_RESULT GetDeviceSongState(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;
   X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) override;
@@ -47,6 +48,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
 
   // The Xbox 360 controls gamepad_remap can move: A B X Y LB RB LT RT LS RS Start Back Guide (the D-pad stays).
   static constexpr int kRemapControls = 13;
+  // The controls of Guitar Hero III's layout in a song (gamepad_song_binds): the five frets, the open note, Star Power
+  // and the whammy bar.
+  static constexpr int kSongActions = 8;
 
   // A whammy bar or a tilt a launcher calibrated (gamepad_whammy_calibration, gamepad_tilt_calibration): the
   // SDL_GamepadAxis it is on, or past them the accelerometer's axis, and that source's value at rest and at its other
@@ -90,6 +94,10 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     // For each remappable control, the physical inputs that press it (SDL_GamepadButton bits; bits 32 and 33
     // are the left and right triggers).
     std::array<uint64_t, kRemapControls> sources;
+    // In a song on Guitar Hero III's layout, the physical inputs of each of its controls (gamepad_song_binds: as
+    // `sources`, and bits 34 and 35 for the left and right sticks pushed), and whether the last read was a song's.
+    std::array<uint64_t, kSongActions> song_sources;
+    bool last_read_song;
     // A guitar whose whammy bar (the right stick's X axis, -32768 at rest) has not reported a position yet: an Xbox
     // 360 guitar reads 0 there, half pressed, until the bar first moves. Until then the bar is at rest (with
     // guitar_whammy_rest).
@@ -141,6 +149,10 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void UpdateXCapabilities(ControllerState& state);
   // The guest's buttons and triggers from the physical ones, through gamepad_remap.
   static void ApplyRemap(ControllerState& state);
+  // GetDeviceState and GetDeviceSongState.
+  X_RESULT ReadDeviceState(DeviceId id, X_INPUT_STATE* out_state, bool song);
+  // A song's pad on Guitar Hero III's layout from the physical controls, through song_sources.
+  static X_INPUT_GAMEPAD SongGamepad(const ControllerState& state);
   // An Xbox One guitar's tilt from its GameInput report, as the right stick's Y.
   static void PollGipTilt(ControllerState& state);
   static void LogGipTiltRange(ControllerState& state, const char* when);

@@ -46,6 +46,16 @@ REXCVAR_DEFINE_STRING(gamepad_device_remap, "", "Input",
                       "'controller:control=input,...' joined by ';', a controller named by its serial number or "
                       "else its SDL GUID (as the log's OnControllerDeviceAdded lines give them). A launcher writes "
                       "it");
+REXCVAR_DEFINE_STRING(gamepad_song_binds, "", "Input",
+                      "A controller's own buttons in a song on Guitar Hero III's layout (gamepad_guitar_layout = "
+                      "\"gh3\"), apart from the menus' (gamepad_remap, gamepad_device_remap): sections "
+                      "'controller:action=input|input,...' joined by ';', a controller named as in "
+                      "gamepad_device_remap. action is green red yellow blue orange open star whammy; input is one of "
+                      "gamepad_remap's, dpad (any of its directions), lstick or rstick (the stick pushed from its "
+                      "centre). An action left out keeps Guitar Hero III's: green=lt, red=lb, yellow=rb, blue=rt, "
+                      "orange=south, open=east, star=back|dpad, whammy=lstick|rstick; 'action=' puts it on nothing. "
+                      "The whammy bar follows a trigger's or a stick's travel, a button's all or nothing. Start is the "
+                      "menus' Start. A launcher writes it");
 REXCVAR_DEFINE_STRING(gamepad_whammy_calibration, "", "Input",
                       "Whammy bars a launcher calibrated: controller=axis:rest:full entries separated by commas, a "
                       "controller named as in gamepad_device_remap, axis one of lx ly rx ry lt rt, rest and full the "
@@ -163,6 +173,27 @@ constexpr std::array<uint64_t, SDLInputDriver::kRemapControls> kDefaultSources =
     Bit(SDL_GAMEPAD_BUTTON_GUIDE) | Bit(SDL_GAMEPAD_BUTTON_MISC1) | Bit(SDL_GAMEPAD_BUTTON_TOUCHPAD),
 };
 
+// gamepad_song_binds: the controls of Guitar Hero III's layout in a song, the sticks pushed as two more inputs, and
+// the layout's own inputs for each (what the game's controller code reads: the triggers, the bumpers, A, B, Back, the
+// D-pad and either stick).
+constexpr int kInputLeftStick = 34;
+constexpr int kInputRightStick = 35;
+enum SongAction : int { kGreen, kRed, kYellow, kBlue, kOrange, kOpen, kStar, kWhammy };
+constexpr const char* kSongActionNames[] = {"green", "red", "yellow", "blue", "orange", "open", "star", "whammy"};
+static_assert(std::size(kSongActionNames) == SDLInputDriver::kSongActions);
+constexpr uint64_t kDpadInputs = Bit(SDL_GAMEPAD_BUTTON_DPAD_UP) | Bit(SDL_GAMEPAD_BUTTON_DPAD_DOWN) |
+                                 Bit(SDL_GAMEPAD_BUTTON_DPAD_LEFT) | Bit(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+constexpr std::array<uint64_t, SDLInputDriver::kSongActions> kDefaultSongSources = {
+    Bit(kInputLeftTrigger),
+    Bit(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER),
+    Bit(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER),
+    Bit(kInputRightTrigger),
+    Bit(SDL_GAMEPAD_BUTTON_SOUTH),
+    Bit(SDL_GAMEPAD_BUTTON_EAST),
+    Bit(SDL_GAMEPAD_BUTTON_BACK) | kDpadInputs,
+    Bit(kInputLeftStick) | Bit(kInputRightStick),
+};
+
 std::string_view Trim(std::string_view s) {
   while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
     s.remove_prefix(1);
@@ -273,6 +304,81 @@ std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType ty
       }
     }
     changes += (changes.empty() ? "" : ",") + std::string(kControlNames[c]) + "=" + inputs;
+  }
+  return sources;
+}
+
+// gamepad_song_binds' section for a controller (its serial number's, else its GUID's) over Guitar Hero III's own
+// inputs; `changes` gets what it changes, for the log.
+std::array<uint64_t, SDLInputDriver::kSongActions> SongSourcesFor(std::string_view serial, std::string_view guid,
+                                                                  std::string& changes) {
+  std::array<uint64_t, SDLInputDriver::kSongActions> sources = kDefaultSongSources;
+  std::optional<std::string_view> by_serial, by_guid;
+  ForEachPiece(REXCVAR_GET(gamepad_song_binds), ';', [&](std::string_view section) {
+    size_t colon = section.rfind(':');
+    if (colon == std::string_view::npos) {
+      return;
+    }
+    std::string_view controller = Trim(section.substr(0, colon));
+    if (!serial.empty() && EqualsCI(controller, serial)) {
+      by_serial = section.substr(colon + 1);
+    } else if (!guid.empty() && EqualsCI(controller, guid)) {
+      by_guid = section.substr(colon + 1);
+    }
+  });
+  if (!by_serial && !by_guid) {
+    return sources;
+  }
+  ForEachPiece(by_serial ? *by_serial : *by_guid, ',', [&](std::string_view entry) {
+    size_t equals = entry.find('=');
+    if (entry.empty() || equals == std::string_view::npos) {
+      return;
+    }
+    std::string_view action = Trim(entry.substr(0, equals));
+    auto a = std::find_if(std::begin(kSongActionNames), std::end(kSongActionNames),
+                          [&](const char* name) { return EqualsCI(action, name); });
+    if (a == std::end(kSongActionNames)) {
+      REXLOG_WARN("gamepad_song_binds: unknown action '{}'", action);
+      return;
+    }
+    uint64_t mask = 0;
+    ForEachPiece(entry.substr(equals + 1), '|', [&](std::string_view input) {
+      if (input.empty()) {
+        return;
+      }
+      if (EqualsCI(input, "dpad")) {
+        mask |= kDpadInputs;
+        return;
+      }
+      if (EqualsCI(input, "lstick") || EqualsCI(input, "rstick")) {
+        mask |= Bit(EqualsCI(input, "lstick") ? kInputLeftStick : kInputRightStick);
+        return;
+      }
+      auto i = std::find_if(std::begin(kInputNames), std::end(kInputNames),
+                            [&](const InputName& n) { return EqualsCI(input, n.name); });
+      if (i == std::end(kInputNames)) {
+        REXLOG_WARN("gamepad_song_binds: unknown input '{}'", input);
+        return;
+      }
+      mask |= Bit(i->input);
+    });
+    sources[size_t(a - std::begin(kSongActionNames))] = mask;
+  });
+  for (int a = 0; a < SDLInputDriver::kSongActions; ++a) {
+    if (sources[size_t(a)] == kDefaultSongSources[size_t(a)]) {
+      continue;
+    }
+    const uint64_t mask = sources[size_t(a)];
+    const bool dpad = (mask & kDpadInputs) == kDpadInputs;
+    std::string inputs = dpad ? "dpad" : "";
+    for (const InputName& n : kInputNames) {
+      if ((mask & Bit(n.input)) && !(dpad && (Bit(n.input) & kDpadInputs))) {
+        inputs += (inputs.empty() ? "" : "|") + std::string(n.name);
+      }
+    }
+    if (mask & Bit(kInputLeftStick)) inputs += (inputs.empty() ? "" : "|") + std::string("lstick");
+    if (mask & Bit(kInputRightStick)) inputs += (inputs.empty() ? "" : "|") + std::string("rstick");
+    changes += (changes.empty() ? "" : ",") + std::string(kSongActionNames[a]) + "=" + inputs;
   }
   return sources;
 }
@@ -784,6 +890,14 @@ X_RESULT SDLInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
 }
 
 X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+  return ReadDeviceState(id, out_state, false);
+}
+
+X_RESULT SDLInputDriver::GetDeviceSongState(DeviceId id, X_INPUT_STATE* out_state) {
+  return ReadDeviceState(id, out_state, true);
+}
+
+X_RESULT SDLInputDriver::ReadDeviceState(DeviceId id, X_INPUT_STATE* out_state, bool song) {
   assert(sdl_events_initialized_ && SDL_Gamepad_initialized_);
 
   auto is_active = this->is_active();
@@ -804,13 +918,18 @@ X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
 
   // Make sure packet_number is only incremented by 1, even if there have been
   // multiple updates between GetState calls. Also track `is_active` to
-  // increment the packet number if it changed.
-  if ((is_active != controller->is_active) || (is_active && controller->state_changed)) {
+  // increment the packet number if it changed, and a song's layout coming or going.
+  if ((is_active != controller->is_active) || (is_active && controller->state_changed) ||
+      song != controller->last_read_song) {
     controller->state.packet_number++;
     controller->is_active = is_active;
     controller->state_changed = false;
+    controller->last_read_song = song;
   }
   std::memcpy(out_state, &controller->state, sizeof(*out_state));
+  if (song) {
+    out_state->gamepad = SongGamepad(*controller);
+  }
   if (!is_active) {
     // Simulate an "untouched" controller. When we become active again the
     // pressed buttons aren't lost and will be visible again.
@@ -1164,6 +1283,12 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
     REXLOG_INFO("SDL OnControllerDeviceAdded: gamepad_remap for {} (gamepad_device_remap for this one included): {}",
                 SDL_GetGamepadStringForType(SDL_GetGamepadType(controller)), remap_changes);
   }
+  std::string song_changes;
+  state.song_sources = SongSourcesFor(serial ? serial : "", guid_text, song_changes);
+  if (!song_changes.empty()) {
+    REXLOG_INFO("SDL OnControllerDeviceAdded: in a song on Guitar Hero III's layout (gamepad_song_binds): {}",
+                song_changes);
+  }
   UpdateXCapabilities(state);
   state.whammy = AxisCalibrationFor(REXCVAR_GET(gamepad_whammy_calibration), serial ? serial : "", guid_text);
   state.tilt = AxisCalibrationFor(REXCVAR_GET(gamepad_tilt_calibration), serial ? serial : "", guid_text);
@@ -1401,6 +1526,73 @@ void SDLInputDriver::ApplyRemap(ControllerState& state) {
   state.state.gamepad.buttons = buttons;
   state.state.gamepad.left_trigger = trigger(state.sources[kLT]);
   state.state.gamepad.right_trigger = trigger(state.sources[kRT]);
+}
+
+X_INPUT_GAMEPAD SDLInputDriver::SongGamepad(const ControllerState& state) {
+  // A stick's push: its distance from the centre past a sixth (a stick's drift), 0 to 1.
+  auto stick = [&state](bool right) {
+    const double x = right ? state.state.gamepad.thumb_rx : state.state.gamepad.thumb_lx;
+    const double y = right ? state.state.gamepad.thumb_ry : state.state.gamepad.thumb_ly;
+    constexpr double kDeadZone = 0.16;
+    const double push = std::min(1.0, std::sqrt(x * x + y * y) / 32767.0);
+    return std::max(0.0, (push - kDeadZone) / (1.0 - kDeadZone));
+  };
+  // How far the inputs of `sources` are pressed, 0 to 1: a button all or nothing.
+  auto travel = [&](uint64_t sources) {
+    double t = (sources & state.physical_buttons) != 0 ? 1.0 : 0.0;
+    if (sources & Bit(kInputLeftTrigger)) t = std::max(t, state.physical_triggers[0] / 255.0);
+    if (sources & Bit(kInputRightTrigger)) t = std::max(t, state.physical_triggers[1] / 255.0);
+    if (sources & Bit(kInputLeftStick)) t = std::max(t, stick(false));
+    if (sources & Bit(kInputRightStick)) t = std::max(t, stick(true));
+    return t;
+  };
+  // Pressed: a button; a trigger past the threshold the rest of the driver uses; a stick past half way.
+  auto pressed = [&](uint64_t sources) {
+    return (sources & state.physical_buttons) != 0 ||
+           ((sources & Bit(kInputLeftTrigger)) && state.physical_triggers[0] > HID_SDL_TRIGG_THRES) ||
+           ((sources & Bit(kInputRightTrigger)) && state.physical_triggers[1] > HID_SDL_TRIGG_THRES) ||
+           ((sources & Bit(kInputLeftStick)) && stick(false) > 0.5) ||
+           ((sources & Bit(kInputRightStick)) && stick(true) > 0.5);
+  };
+  const auto& song = state.song_sources;
+  X_INPUT_GAMEPAD pad = {};
+  uint16_t buttons = 0;
+  // Start, for the pause menu, where the menus have it.
+  if ((state.sources[kStart] & state.physical_buttons) != 0) buttons |= X_INPUT_GAMEPAD_START;
+  if (pressed(song[kRed])) buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  if (pressed(song[kYellow])) buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+  if (pressed(song[kOrange])) buttons |= X_INPUT_GAMEPAD_A;
+  if (pressed(song[kOpen])) buttons |= X_INPUT_GAMEPAD_B;
+  if (pressed(song[kStar])) buttons |= X_INPUT_GAMEPAD_BACK;
+  pad.buttons = buttons;
+  pad.left_trigger = pressed(song[kGreen]) ? 0xFF : 0;
+  pad.right_trigger = pressed(song[kBlue]) ? 0xFF : 0;
+  // The whammy bar on the right stick, the left one at rest. Guitar Hero III's code takes the bar from the left stick
+  // when its length is above 0, else from the right one, and whammying from either axis of that stick moving: a stick
+  // of the bar's goes as it is (X and Y, the one pushed furthest), a button or a trigger as the X's travel. At rest a
+  // stick is at the game's own centre: it reads an axis as a byte, (x + 32767) >> 8 and (32767 - y) >> 8, so XInput's
+  // 0 is 127, one short of its 128, and a left stick at 0 had a length (about 0.01) that took the bar from it: the
+  // whammy bar never moved (Gustavo's test; the game's dead zone for a guitar's sticks is none).
+  constexpr int16_t kCentreX = 1;
+  constexpr int16_t kCentreY = -1;
+  pad.thumb_lx = pad.thumb_rx = kCentreX;
+  pad.thumb_ly = pad.thumb_ry = kCentreY;
+  double best = travel(song[kWhammy] & ~(Bit(kInputLeftStick) | Bit(kInputRightStick)));
+  if (best > 0.0) {
+    pad.thumb_rx = static_cast<int16_t>(std::max<long>(kCentreX, std::lround(best * 32767.0)));
+  }
+  for (bool right : {false, true}) {
+    if (!(song[kWhammy] & Bit(right ? kInputRightStick : kInputLeftStick))) {
+      continue;
+    }
+    const double push = stick(right);
+    if (push > 0.0 && push >= best) {
+      best = push;
+      pad.thumb_rx = right ? state.state.gamepad.thumb_rx : state.state.gamepad.thumb_lx;
+      pad.thumb_ry = right ? state.state.gamepad.thumb_ry : state.state.gamepad.thumb_ly;
+    }
+  }
+  return pad;
 }
 
 void SDLInputDriver::PollGipTilt(ControllerState& state) {

@@ -79,8 +79,9 @@ REXCVAR_DEFINE_STRING(gamepad_guitar_layout, "guitar", "Input",
                       "(rex::input::PlaysGh3Layout; Guitar Hero: World Tour's engine and later kept it): frets on LT, "
                       "LB, RB, RT and A, a fret pressed plays, Star Power on the D-pad, the whammy bar on either "
                       "stick. Such a gamepad then reaches the game as it is (no whammy bar made of its stick, no "
-                      "tap). Real guitars, drum kits, the keyboard's pad and a gamepad with a calibrated whammy bar "
-                      "keep theirs");
+                      "tap), and in a song (the game's tap gate open) on its own buttons for songs, apart from the "
+                      "menus' (gamepad_song_binds). Real guitars, drum kits, the keyboard's pad and a gamepad with a "
+                      "calibrated whammy bar keep theirs");
 REXCVAR_DEFINE_BOOL(gamepad_whammy_rest, false, "Input",
                     "A gamepad, or the keyboard's pad, that the game is told is a guitar: its right stick's X "
                     "axis is the whammy bar, at rest (-32768) while the stick is centred and fully pressed at "
@@ -652,18 +653,30 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_stat
   // magnitude, which for bars at rest at -32768 is the bar at rest.
   bool whammy = false;
   int32_t whammy_rx = -32768;
+  // A song played on Guitar Hero III's layout (the game's gate, as the taps', and the device in the player's hands on
+  // it, as PlaysGh3Layout chooses): such controllers on their buttons for songs, apart from the menus' (the SDL
+  // driver's gamepad_song_binds), and only they. Another device of the user (the keyboard's pad shares user 0) would
+  // put its whammy bar at rest, -32768, on the right stick's X, which the game's controller code reads as a stick
+  // pushed all the way. Its state is still read, so that using it makes it the one in the player's hands.
+  const DeviceInfo* chosen = DeviceInfoFor(ChooseDeviceForUser(user_index));
+  const bool song_layout = chosen && Gh3LayoutDevice(*chosen) && TapGateOpen();
   for (DeviceId id : ids) {
     auto* driver = DriverForDevice(id);
     if (!driver) {
       continue;
     }
     X_INPUT_STATE state = {};
-    if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
+    const DeviceInfo* info = DeviceInfoFor(id);
+    const bool song = song_layout && info && Gh3LayoutDevice(*info);
+    if ((song ? driver->GetDeviceSongState(id, &state) : driver->GetDeviceState(id, &state)) != X_ERROR_SUCCESS) {
       continue;
     }
     // The controller in the player's hands, by what the player does (a stick read as a bar at rest is not moved).
     active_devices_.Observe(user_index, id, state.gamepad);
-    if (const DeviceInfo* info = DeviceInfoFor(id); info && PlayAsGuitar(*info, &state.gamepad)) {
+    if (song_layout && !song) {
+      continue;
+    }
+    if (info && PlayAsGuitar(*info, &state.gamepad)) {
       whammy = true;
       whammy_rx = std::max<int32_t>(whammy_rx, state.gamepad.thumb_rx);
     }
