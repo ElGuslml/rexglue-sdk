@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -28,6 +29,8 @@
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/logging.h>
 #include <rex/ui/virtual_key.h>
+
+#include "gameinput_instruments.h"
 
 REXCVAR_DEFINE_STRING(hid_mappings_file, "gamecontrollerdb.txt", "Input",
                       "Path to SDL gamecontroller mappings file");
@@ -50,10 +53,16 @@ REXCVAR_DEFINE_STRING(gamepad_whammy_calibration, "", "Input",
                       "that axis, from -32768 at rest to 32767");
 REXCVAR_DEFINE_STRING(gamepad_tilt_calibration, "", "Input",
                       "Tilts a launcher calibrated: controller=source:rest:full entries separated by commas, a "
-                      "controller named as in gamepad_device_remap, source one of lx ly rx ry lt rt or ax ay az (the "
-                      "controller's accelerometer, in thousandths of m/s2), rest and full its values at rest and "
-                      "tilted. The right stick's Y, a guitar's tilt, is then that source, from 0 at rest to 32767 a "
-                      "fifth short of full");
+                      "controller named as in gamepad_device_remap, source one of lx ly rx ry lt rt, ax ay az (the "
+                      "controller's accelerometer, in thousandths of m/s2) or gip (an Xbox One guitar's tilt, its "
+                      "GameInput report's byte, 0-255), rest and full its values at rest and tilted. The right "
+                      "stick's Y, a guitar's tilt, is then that source, from 0 at rest to 32767 a fifth short of full");
+REXCVAR_DEFINE_BOOL(
+    gamepad_gameinput, true, "Input",
+    "Xbox One guitars and drum kits that are neither XInput nor HID devices (GIP instruments such as the PDP "
+    "Riffmaster, the PDP Jaguar or the Mad Catz Stratocaster) read through GameInput's raw reports, which needs the "
+    "Microsoft GameInput redistributable, version 3 or newer (Windows). A guitar's tilt is then its report's byte "
+    "(gip in gamepad_tilt_calibration). False: they go unread");
 REXCVAR_DEFINE_STRING(gamepad_ignore, "", "Input",
                       "Controllers this game leaves alone, for another program or a second instance of a game on "
                       "this PC: entries separated by commas, each a serial number, an SDL GUID (as the log's "
@@ -269,12 +278,14 @@ std::array<uint64_t, SDLInputDriver::kRemapControls> RemapFor(SDL_GamepadType ty
 }
 
 // gamepad_whammy_calibration's entry for a controller: its serial number's, else its GUID's.
-// Past SDL_GamepadAxis, the accelerometer's axes.
+// Past SDL_GamepadAxis, the accelerometer's axes, then an Xbox One guitar's tilt byte (gameinput_instruments.h).
 constexpr int kAccelSource = SDL_GAMEPAD_AXIS_COUNT;
+constexpr int kGipTiltSource = kAccelSource + 3;
 
 SDLInputDriver::AxisCalibration AxisCalibrationFor(const std::string& text, std::string_view serial,
                                                    std::string_view guid) {
-  constexpr const char* kAxes[] = {"lx", "ly", "rx", "ry", "lt", "rt", "ax", "ay", "az"};
+  constexpr const char* kAxes[] = {"lx", "ly", "rx", "ry", "lt", "rt", "ax", "ay", "az", "gip"};
+  static_assert(std::size(kAxes) == kGipTiltSource + 1, "gip follows the accelerometer's axes");
   std::optional<SDLInputDriver::AxisCalibration> by_serial, by_guid;
   ForEachPiece(text, ',', [&](std::string_view entry) {
     size_t equals = entry.rfind('=');
@@ -368,6 +379,41 @@ void MapPs3Guitar(SDL_JoystickID id, const char* guid) {
     REXLOG_WARN("SDL: a PS3 Guitar Hero guitar's mapping failed: {}", SDL_GetError());
   }
 }
+
+// An Xbox One guitar SDL reads through GameInput's raw reports as a Rock Band 4 guitar (SDL_gameinputjoystick.cpp's
+// list, GAMEINPUT_GetDeviceRawType): the PDP Riffmaster and Jaguar, the Mad Catz Stratocaster, the CRKD / RedOctane
+// Stage Tour guitar. SDL gives it an Xbox 360 guitar's layout (the frets A B X Y LB, the strum on the D-pad, the whammy
+// bar on the right stick's X from -32768) but its tilt as the right shoulder, on past its report's byte 0xD0, its pickup
+// selector as the right stick's Y (Guitar Hero's tilt axis) and its lower frets as the left trigger too.
+bool IsGameInputRockBandGuitar(SDL_Gamepad* gamepad) {
+  SDL_Joystick* joystick = SDL_GetGamepadJoystick(gamepad);
+  if (SDL_GetJoystickType(joystick) != SDL_JOYSTICK_TYPE_GUITAR || SDL_GetJoystickGUID(joystick).data[14] != 'g') {
+    return false;  // 'g': SDL's GameInput driver
+  }
+  const uint16_t vendor = SDL_GetGamepadVendor(gamepad);
+  const uint16_t product = SDL_GetGamepadProduct(gamepad);
+  return (vendor == 0x0E6F && (product == 0x0248 || product == 0x0170)) ||  // PDP Riffmaster, Jaguar
+         (vendor == 0x0738 && product == 0x4161) ||                         // Mad Catz Stratocaster
+         ((vendor == 0x3651 || vendor == 0x3958) && product == 0x4161);     // CRKD / RedOctane Stage Tour
+}
+
+// A controller SDL reads through GameInput that is not an instrument. With GameInput's raw reports on (for the Xbox One
+// guitars above), SDL's GameInput driver also takes every plain controller GameInput lists (an Xbox controller, an
+// XInput guitar such as the X-plorer read as a controller) unless another of SDL's drivers has it already, and which
+// comes first varies: the same controller came twice, one in each of two slots, both played by every press, and in
+// another run only through GameInput (SDL's XInput driver then leaves it to GameInput). So such a controller is open,
+// but left out of the devices (EnumerateDevices) while another driver reads one of the same USB IDs: GameInput is there
+// for the instruments only it reads (a guitar or a drum kit by SDL's raw types).
+bool IsGameInputGamepad(SDL_Gamepad* gamepad) {
+  SDL_Joystick* joystick = SDL_GetGamepadJoystick(gamepad);
+  const SDL_JoystickType type = SDL_GetJoystickType(joystick);
+  return SDL_GetJoystickGUID(joystick).data[14] == 'g' && type != SDL_JOYSTICK_TYPE_GUITAR &&
+         type != SDL_JOYSTICK_TYPE_DRUM_KIT;
+}
+
+// Its tilt by default: the report's byte from 0 (the guitar level) to SDL's own tilted point, 0xD0, so that the right
+// stick's Y is all the way (32767) from four fifths of that (0xA6) on. A launcher's calibration (gip) still wins.
+constexpr SDLInputDriver::AxisCalibration kGipGuitarTilt{kGipTiltSource, 0x00, 0xD0};
 
 // A gamepad's right stick's X has stayed within this of where it was for this long: it rests there, a whammy bar's
 // rest when that is within kRestReach of -32768, a stick's when within kRestReach of the middle.
@@ -578,6 +624,24 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
       if (REXCVAR_GET(input_background)) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
       }
+#if defined(_WIN32)
+      // Xbox One guitars and drum kits: SDL reads them through GameInput's raw reports (on by default with GameInput's
+      // API 3, thirdparty/gameinput), a guitar's tilt through this driver's own GameInput.
+      if (!REXCVAR_GET(gamepad_gameinput)) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_GAMEINPUT_RAW, "0");
+        REXLOG_INFO("GameInput: off (gamepad_gameinput): Xbox One guitars and drum kits go unread.");
+      } else {
+        std::string status;
+        if (gameinput::Start(status)) {
+          REXLOG_INFO("GameInput 3: on: Xbox One guitars and drum kits (such as the PDP Riffmaster) are read through "
+                      "it.");
+        } else {
+          REXLOG_INFO("GameInput 3 not available ({}): Xbox One guitars and drum kits (such as the PDP Riffmaster) "
+                      "need the Microsoft GameInput redistributable.",
+                      status);
+        }
+      }
+#endif
       // Initialize game controller subsystem
       if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         REXLOG_ERROR("SDL: Failed to init gamecontroller subsystem: {}", SDL_GetError());
@@ -615,9 +679,14 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
           [this]() { attached_window_->app_context().ExecutePendingFunctionsFromUIThread(); });
     }
     for (auto& controller : controllers_) {
+      if (controller.gip_guitar) {
+        LogGipTiltRange(controller, "at the end");
+      }
+      gameinput::CloseDevice(controller.gip_device);
       SDL_CloseGamepad(controller.sdl);
     }
     controllers_.clear();
+    gameinput::Stop();
     if (SDL_Gamepad_initialized_) {
       SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
       SDL_Gamepad_initialized_ = false;
@@ -642,7 +711,27 @@ void SDLInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
 
   auto guard = DrainAndLock();
 
+  // GameInput's twins (IsGameInputGamepad): as many of them left out, for each pair of USB IDs, as other drivers read.
+  std::map<uint32_t, int> others;
+  auto usb_ids = [](SDL_Gamepad* gamepad) {
+    return (uint32_t(SDL_GetGamepadVendor(gamepad)) << 16) | SDL_GetGamepadProduct(gamepad);
+  };
+  for (const auto& controller : controllers_) {
+    if (!controller.gameinput_gamepad) others[usb_ids(controller.sdl)]++;
+  }
+
   for (auto& controller : controllers_) {
+    if (controller.gameinput_gamepad) {
+      int& twins = others[usb_ids(controller.sdl)];
+      const bool left_out = twins > 0;
+      if (left_out) twins--;
+      if (left_out != controller.gameinput_left_out) {
+        controller.gameinput_left_out = left_out;
+        REXLOG_INFO("SDL: \"{}\" through GameInput {}.", SDL_GetGamepadName(controller.sdl),
+                    left_out ? "left out: another driver reads it" : "used: no other driver reads it");
+      }
+      if (left_out) continue;
+    }
     controller.right_x_rest = JudgeRightXRest(controller.right_x_rest, controller.right_x_still_value,
                                               controller.right_x_still_since, static_cast<uint64_t>(controller.id));
     DeviceInfo info;
@@ -708,6 +797,9 @@ X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   auto controller = FindController(id);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  if (controller->gip_device) {
+    PollGipTilt(*controller);
   }
 
   // Make sure packet_number is only incremented by 1, even if there have been
@@ -1050,6 +1142,12 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
                   xinput_slot);
     }
   }
+  const bool gameinput_gamepad = IsGameInputGamepad(controller);
+  if (gameinput_gamepad) {
+    REXLOG_INFO("SDL OnControllerDeviceAdded: \"{}\" through GameInput: left out while another driver reads a "
+                "controller of the same USB IDs (its twin), used otherwise.",
+                SDL_GetGamepadName(controller));
+  }
 
   // SDL_GetGamepadPlayerIndex is deliberately ignored: on Windows it reports
   // the XInput user index the OS assigned, which is unrelated to connection
@@ -1057,6 +1155,7 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
   ControllerState state = {};
   state.sdl = controller;
   state.id = AllocateDeviceId();
+  state.gameinput_gamepad = gameinput_gamepad;
   state.state_changed = true;  // XInput starts with packet_number = 1
   std::string remap_changes;
   const char* serial = SDL_GetGamepadSerial(controller);
@@ -1072,7 +1171,8 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
     REXLOG_INFO("SDL OnControllerDeviceAdded: tilt calibrated (gamepad_tilt_calibration): source {}, {} at rest, {} "
                 "tilted.",
                 state.tilt.axis, state.tilt.rest, state.tilt.full);
-    if (state.tilt.axis >= kAccelSource && !SDL_SetGamepadSensorEnabled(controller, SDL_SENSOR_ACCEL, true)) {
+    if (state.tilt.axis >= kAccelSource && state.tilt.axis < kGipTiltSource &&
+        !SDL_SetGamepadSensorEnabled(controller, SDL_SENSOR_ACCEL, true)) {
       REXLOG_WARN("SDL OnControllerDeviceAdded: the accelerometer did not start: {}", SDL_GetError());
     }
   }
@@ -1087,6 +1187,24 @@ void SDLInputDriver::OnControllerDeviceAddedLocked(const SDL_Event& event) {
   } else if (joy_type == SDL_JOYSTICK_TYPE_GUITAR && REXCVAR_GET(guitar_whammy_rest)) {
     state.whammy_unknown = true;
     state.state.gamepad.thumb_rx = INT16_MIN;
+  }
+  if (IsGameInputRockBandGuitar(controller)) {
+    // Played as an Xbox 360 guitar: its tilt as the right stick's Y (the report's byte, or SDL's button without this
+    // driver's GameInput), its right shoulder, pickup selector and lower frets' trigger left out.
+    state.gip_guitar = true;
+    if (state.tilt.axis < 0) {
+      state.tilt = kGipGuitarTilt;
+    }
+    if (state.tilt.axis == kGipTiltSource) {
+      state.gip_device = gameinput::OpenDevice(SDL_GetGamepadPath(controller));
+    }
+    const std::optional<uint8_t> tilt = gameinput::ReadGuitarTilt(state.gip_device);
+    REXLOG_INFO("SDL OnControllerDeviceAdded: an Xbox One guitar read through GameInput: its tilt as the right "
+                "stick's Y ({}), its right shoulder (SDL's tilt), pickup selector and lower frets' trigger left out.",
+                state.gip_device ? fmt::format("its report's byte, 0x{:02X} now, from 0x{:02X} level to 0x{:02X} tilted",
+                                               tilt.value_or(0), state.tilt.rest, state.tilt.full)
+                : state.tilt.axis == kGipTiltSource ? std::string("SDL's tilt button: the GameInput device was not found")
+                                                    : std::string("gamepad_tilt_calibration's source"));
   }
   controllers_.push_back(state);
 
@@ -1114,6 +1232,10 @@ void SDLInputDriver::OnControllerDeviceRemovedLocked(const SDL_Event& event) {
                    static_cast<int>(sizeof(removed_guid)));
   REXLOG_INFO("SDL OnControllerDeviceRemoved: \"{}\", GUID({}).", removed_name ? removed_name : "?",
               removed_guid);
+  if (controllers_.at(*idx).gip_guitar) {
+    LogGipTiltRange(controllers_.at(*idx), "when it was removed");
+  }
+  gameinput::CloseDevice(controllers_.at(*idx).gip_device);
   SDL_CloseGamepad(removed);
   controllers_.erase(controllers_.begin() + static_cast<ptrdiff_t>(*idx));
 
@@ -1174,6 +1296,9 @@ void SDLInputDriver::OnControllerDeviceAxisMotionLocked(const SDL_Event& event) 
       break;
     // The triggers go through gamepad_remap, like the buttons.
     case SDL_GAMEPAD_AXIS_LEFT_TRIGGER:
+      if (controller.gip_guitar) {
+        break;  // its lower frets held, which also press their frets: an Xbox 360 guitar has no trigger
+      }
       controller.physical_triggers[0] = static_cast<uint8_t>(event.gaxis.value >> 7);
       ApplyRemap(controller);
       break;
@@ -1195,7 +1320,7 @@ void SDLInputDriver::OnControllerDeviceSensorLocked(const SDL_Event& event) {
   }
   auto& controller = controllers_.at(*idx);
   const int source = controller.tilt.axis - kAccelSource;
-  if (source < 0 || event.gsensor.sensor != SDL_SENSOR_ACCEL) {
+  if (source < 0 || source > 2 || event.gsensor.sensor != SDL_SENSOR_ACCEL) {
     return;
   }
   const int16_t tilt =
@@ -1217,6 +1342,15 @@ void SDLInputDriver::OnControllerDeviceButtonChangedLocked(const SDL_Event& even
   if (event.gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT) {
     // A newer SDL Version may have added new buttons.
     REXLOG_INFO("SDL HID: Unknown button was pressed: {}.", event.gbutton.button);
+    return;
+  }
+  // An Xbox One guitar's right shoulder is SDL's tilt, on or off: the tilt's own (the report's byte) when this driver
+  // reads it, else the right stick's Y all the way while it is on.
+  if (controller.gip_guitar && event.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) {
+    if (!controller.gip_device && controller.tilt.axis == kGipTiltSource) {
+      controller.state.gamepad.thumb_ry = event.gbutton.down ? 32767 : 0;
+      controller.state_changed = true;
+    }
     return;
   }
   // The controller's own button; the guest's follow from gamepad_remap (the standard layout by default).
@@ -1267,6 +1401,46 @@ void SDLInputDriver::ApplyRemap(ControllerState& state) {
   state.state.gamepad.buttons = buttons;
   state.state.gamepad.left_trigger = trigger(state.sources[kLT]);
   state.state.gamepad.right_trigger = trigger(state.sources[kRT]);
+}
+
+void SDLInputDriver::PollGipTilt(ControllerState& state) {
+  const std::optional<uint8_t> raw = gameinput::ReadGuitarTilt(state.gip_device);
+  if (!raw) {
+    return;
+  }
+  // The range seen, logged as it widens by a sixteenth, so that a player's log tells where this guitar's tilt rests
+  // and how far it goes.
+  if (!state.gip_tilt_seen) {
+    state.gip_tilt_seen = true;
+    state.gip_tilt_low = state.gip_tilt_high = *raw;
+    state.gip_tilt_logged_low = state.gip_tilt_logged_high = *raw;
+    REXLOG_INFO("SDL: device {}'s tilt (its GameInput report's byte) first read 0x{:02X}.",
+                static_cast<uint64_t>(state.id), *raw);
+  } else {
+    state.gip_tilt_low = std::min(state.gip_tilt_low, *raw);
+    state.gip_tilt_high = std::max(state.gip_tilt_high, *raw);
+    if (state.gip_tilt_logged_low - state.gip_tilt_low >= 0x10 ||
+        state.gip_tilt_high - state.gip_tilt_logged_high >= 0x10) {
+      LogGipTiltRange(state, "so far");
+    }
+  }
+  const int16_t tilt = CalibratedTilt(state.tilt, *raw);
+  if (static_cast<int16_t>(state.state.gamepad.thumb_ry) != tilt) {
+    state.state.gamepad.thumb_ry = tilt;
+    state.state_changed = true;
+  }
+}
+
+void SDLInputDriver::LogGipTiltRange(ControllerState& state, const char* when) {
+  if (!state.gip_tilt_seen) {
+    REXLOG_INFO("SDL: device {}'s tilt: no GameInput reading {}.", static_cast<uint64_t>(state.id), when);
+    return;
+  }
+  REXLOG_INFO("SDL: device {}'s tilt read 0x{:02X} to 0x{:02X} {} (the right stick's Y all the way from 0x{:02X}).",
+              static_cast<uint64_t>(state.id), state.gip_tilt_low, state.gip_tilt_high, when,
+              state.tilt.rest + (state.tilt.full - state.tilt.rest) * 4 / 5);
+  state.gip_tilt_logged_low = state.gip_tilt_low;
+  state.gip_tilt_logged_high = state.gip_tilt_high;
 }
 
 std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(SDL_JoystickID instance_id) {

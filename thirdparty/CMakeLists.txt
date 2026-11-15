@@ -301,7 +301,18 @@ if(UNIX AND NOT APPLE)
     set(SDL_PIPEWIRE_SHARED   ON  CACHE BOOL "" FORCE)
 endif()
 
+# GameInput's API 3 header (thirdparty/gameinput, MIT): SDL reads Xbox One guitars and drums (GIP devices, neither
+# XInput nor HID) through GameInput's raw reports only when built against API 3, and the Windows SDK's GameInput.h is
+# API 0. SDL's check compiles the header as C, which API 3 refuses (it is C++ only), so its result is given here.
+if(WIN32)
+    set(HAVE_GAMEINPUT_H 1 CACHE INTERNAL "GameInput's header: thirdparty/gameinput's (API 3)")
+endif()
+
 add_subdirectory(sdl3)
+
+if(WIN32)
+    target_include_directories(SDL3-static BEFORE PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gameinput/include")
+endif()
 
 #=============================================================================
 # DXC API headers (vendored from DirectXShaderCompiler, runtime-loaded)

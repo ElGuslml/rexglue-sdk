@@ -178,6 +178,13 @@ function(rexglue_configure_target target_name)
         endif()
     endif()
 
+    # Microsoft GameInput's redistributable, when REXGLUE_GAMEINPUT_REDIST_MSI names it (GameInputRedist.msi, from
+    # the Microsoft.GameInput NuGet package): next to the host, where a launcher offers it to a player whose PC lacks
+    # GameInput's API 3, which SDL needs for Xbox One guitars and drum kits (thirdparty/gameinput).
+    if(WIN32 AND REXGLUE_GAMEINPUT_REDIST_MSI AND EXISTS "${REXGLUE_GAMEINPUT_REDIST_MSI}")
+        list(APPEND _rexglue_staged_plugins "${REXGLUE_GAMEINPUT_REDIST_MSI}")
+    endif()
+
     if(WIN32)
         # The POST_BUILD copies run only when the host links again. A change to the SDK alone
         # builds new DLLs without that: the GPU plugins are not linked at all, and rexruntime's

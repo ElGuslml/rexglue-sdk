@@ -104,6 +104,18 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
     RightXRest right_x_rest;
     int32_t right_x_still_value;
     std::chrono::steady_clock::time_point right_x_still_since;
+    // An Xbox One guitar SDL reads through GameInput's raw reports (a Rock Band 4 guitar's, the PDP Riffmaster's among
+    // them). Its tilt, which SDL gives as the right shoulder past a fixed point, is the report's byte, read through
+    // `gip_device` (the GameInput device, gameinput_instruments.h; null: SDL's button stands for it, on or off).
+    bool gip_guitar;
+    // A plain controller read through GameInput (IsGameInputGamepad): left out of the devices while another driver
+    // reads one of the same USB IDs (EnumerateDevices), the last answer kept for the log.
+    bool gameinput_gamepad;
+    bool gameinput_left_out;
+    void* gip_device;
+    // The tilt's raw values seen so far and those last logged, for the log.
+    bool gip_tilt_seen;
+    uint8_t gip_tilt_low, gip_tilt_high, gip_tilt_logged_low, gip_tilt_logged_high;
   };
 
   // WindowListener
@@ -129,6 +141,9 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void UpdateXCapabilities(ControllerState& state);
   // The guest's buttons and triggers from the physical ones, through gamepad_remap.
   static void ApplyRemap(ControllerState& state);
+  // An Xbox One guitar's tilt from its GameInput report, as the right stick's Y.
+  static void PollGipTilt(ControllerState& state);
+  static void LogGipTiltRange(ControllerState& state, const char* when);
   void QueueControllerUpdate();
 
   rex::ui::Window* attached_window_ = nullptr;
