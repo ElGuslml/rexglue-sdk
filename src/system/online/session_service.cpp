@@ -848,6 +848,7 @@ void SessionService::OnInvite(uint64_t peer, const uint8_t* data, size_t size) {
       accepted_invite_ = invite;
       invited_.insert(invite.info.xnkid);
       pending_invite_.reset();
+      InviteServedJoin();
     }
     REXSYS_INFO("online: the invite from {:016X} accepted: the game joins its party", invite.inviter);
     Deliver(invite.user_index);
@@ -880,6 +881,7 @@ void SessionService::OnExternalInvite(const uint8_t* data, size_t size,
       if (known) {
         accepted_invite_ = invite;
         pending_invite_.reset();
+        InviteServedJoin();
       } else {
         pending_invite_ = invite;
         pending_since_ = std::chrono::steady_clock::now();
@@ -929,9 +931,19 @@ bool SessionService::MaybeAcceptPending() {
   }
   accepted_invite_ = pending_invite_;
   pending_invite_.reset();
+  InviteServedJoin();
   REXSYS_INFO("online: the invite from {:016X}: its party found, the game joins it",
               accepted_invite_->inviter);
   return true;
+}
+
+void SessionService::InviteServedJoin() {
+  // An invite accepted takes the game to a party of the group it joined: that join is served, as MaybeInvite would
+  // have served it. Left unspent, the follow fired later, at the hub's next party: a friend who joined by an invite
+  // and whose game went back to its own lobby when the host quit a song was taken into the host's new party unasked
+  // (Guitar Hero: Warriors of Rock between two PCs), where one who joined without an invite stays until invited again.
+  followed_join_ = net_->hub_joins();
+  followed_party_.reset();
 }
 
 bool SessionService::MaybeInvite() {

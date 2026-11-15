@@ -248,6 +248,8 @@ class SessionService {
   // party, until the game is told (an invite dropped as its party went lets the next party of the hub stand in).
   uint64_t followed_join_ = 0;
   std::optional<std::array<uint8_t, kXnKidSize>> followed_party_;
+  // An invite accepted serves the current join too (mutex_ held).
+  void InviteServedJoin();
   std::optional<AcceptedInvite> accepted_invite_;
   // An invite accepted whose party is not known yet (an external invite: this game is joining the
   // inviter's group).
