@@ -25,7 +25,8 @@ REXCVAR_DEFINE_STRING(audio_output_device, "", "Audio",
 REXCVAR_DEFINE_STRING(audio_channels, "auto", "Audio",
                       "auto: the game's 5.1 to a device of more than two channels, folded to stereo for the others; "
                       "stereo: always folded to stereo; mono: folded, then the same sound on both sides");
-REXCVAR_DEFINE_INT32(audio_volume, 100, "Audio", "The game's volume, 0-100 (%)");
+REXCVAR_DEFINE_INT32(audio_volume, 100, "Audio",
+                     "The game's volume, 0-200 (%). Above 100 the loudest moments can clip");
 REXCVAR_DEFINE_BOOL(audio_mute_unfocused, false, "Audio",
                     "Silence while the game's window is not in front (another window has the focus)");
 
@@ -73,7 +74,7 @@ float GetOutputGain() {
   if (g_background.load(std::memory_order_relaxed) && REXCVAR_GET(audio_mute_unfocused)) {
     return 0.0f;
   }
-  const float volume = float(std::clamp(REXCVAR_GET(audio_volume), 0, 100)) / 100.0f;
+  const float volume = float(std::clamp(REXCVAR_GET(audio_volume), 0, 200)) / 100.0f;
   std::lock_guard<std::mutex> lock(g_mutex);
   return g_gain * volume;
 }
