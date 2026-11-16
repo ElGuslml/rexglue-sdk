@@ -13,6 +13,9 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <array>
+#include <map>
+#include <mutex>
 
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
@@ -605,6 +608,52 @@ u32 XeKeysAesCbcUsingKey_entry(mapped_void obscured_key, mapped_void inp_ptr, u3
   return X_STATUS_SUCCESS;
 }
 
+// The AES keys a title sets with XeKeysSetKey, by number (the title's own key numbers, 0xE0 on: the XDK
+// wrapper adds 0xE0 to the title's index), which the hypervisor keeps and XeKeysAesCbc then uses.
+// Rock Band 2 sets key 0xE0 and decrypts each song's 16-byte key with it.
+namespace {
+std::mutex title_keys_mutex;
+std::map<uint32_t, std::array<uint8_t, 16>> title_keys;
+}  // namespace
+
+u32 XeKeysSetKey_entry(u32 key_num, mapped_void key_ptr, u32 key_size) {
+  if (!key_ptr || key_size != 16) {
+    REXKRNL_WARN("XeKeysSetKey: key {:#x} of {} bytes not kept (16-byte AES keys only)", key_num,
+                 key_size);
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  std::array<uint8_t, 16> key;
+  std::memcpy(key.data(), key_ptr.as<const uint8_t*>(), key.size());
+  std::lock_guard<std::mutex> lock(title_keys_mutex);
+  title_keys[key_num] = key;
+  return X_STATUS_SUCCESS;
+}
+
+// AES-128-CBC with a key XeKeysSetKey kept. No feed: a zero IV, as the hypervisor's.
+u32 XeKeysAesCbc_entry(u32 key_num, mapped_void inp_ptr, u32 inp_size, mapped_void out_ptr,
+                       mapped_void feed_ptr, u32 encrypt) {
+  std::array<uint8_t, 16> key;
+  {
+    std::lock_guard<std::mutex> lock(title_keys_mutex);
+    auto it = title_keys.find(key_num);
+    if (it == title_keys.end()) {
+      REXKRNL_WARN("XeKeysAesCbc: key {:#x} was never set", key_num);
+      return X_STATUS_INVALID_PARAMETER;
+    }
+    key = it->second;
+  }
+  if (!inp_ptr || !out_ptr || (inp_size % 16) != 0) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  XECRYPT_AES_STATE aes;
+  XeCryptAesKey_entry(ppc_ptr_t<XECRYPT_AES_STATE>::from_host(&aes),
+                      mapped_void::from_host(key.data()));
+  uint8_t zero_feed[16] = {};
+  XeCryptAesCbc_entry(ppc_ptr_t<XECRYPT_AES_STATE>::from_host(&aes), inp_ptr, inp_size, out_ptr,
+                      feed_ptr ? feed_ptr : mapped_void::from_host(zero_feed), encrypt);
+  return X_STATUS_SUCCESS;
+}
+
 u32 XeKeysObscureKey_entry(mapped_void input, mapped_void output) {
   // Based on HvxKeysObscureKey
   // Seems to encrypt input with per-console KEY_OBFUSCATION_KEY (key 0x18)
@@ -707,14 +756,14 @@ REX_EXPORT_STUB(__imp__XeKeysSaveKeyVault);
 REX_EXPORT_STUB(__imp__XeKeysGetStatus);
 REX_EXPORT_STUB(__imp__XeKeysGeneratePrivateKey);
 REX_EXPORT_STUB(__imp__XeKeysGetKeyProperties);
-REX_EXPORT_STUB(__imp__XeKeysSetKey);
+REX_EXPORT(__imp__XeKeysSetKey, rex::kernel::xboxkrnl::XeKeysSetKey_entry)
 REX_EXPORT_STUB(__imp__XeKeysGenerateRandomKey);
 REX_EXPORT_STUB(__imp__XeKeysGetKey);
 REX_EXPORT_STUB(__imp__XeKeysGetDigest);
 REX_EXPORT_STUB(__imp__XeKeysGetConsoleID);
 REX_EXPORT_STUB(__imp__XeKeysGetConsoleType);
 REX_EXPORT_STUB(__imp__XeKeysQwNeRsaPrvCrypt);
-REX_EXPORT_STUB(__imp__XeKeysAesCbc);
+REX_EXPORT(__imp__XeKeysAesCbc, rex::kernel::xboxkrnl::XeKeysAesCbc_entry)
 REX_EXPORT_STUB(__imp__XeKeysDes2Cbc);
 REX_EXPORT_STUB(__imp__XeKeysDesCbc);
 REX_EXPORT_STUB(__imp__XeKeysSaveBootLoaderEx);
