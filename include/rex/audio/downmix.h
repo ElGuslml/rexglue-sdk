@@ -63,8 +63,8 @@ SurroundMix GetSurroundMix();
 /// Linear master gain applied to the stereo fold and to 5.1 passthrough alike.
 /// 1.0 is unity. Above unity can clip, and the output stage clamps.
 /// GetOutputGain returns the title's gain times the player's volume
-/// (audio_volume), and 0 while the game's window is in the background with
-/// audio_mute_unfocused on.
+/// (audio_volume, 0 to 200 %: above 100 it is a gain above unity too), and 0
+/// while the game's window is in the background with audio_mute_unfocused on.
 void SetOutputGain(float linear);
 float GetOutputGain();
 
