@@ -116,6 +116,12 @@ struct XWSAOVERLAPPED {
   rex::be<uint32_t> event_handle;
 };
 
+// An overlapped operation's Internal while it runs (STATUS_PENDING), and the errors of one that has
+// not completed: when it starts (WSA_IO_PENDING) and when it is asked for (WSA_IO_INCOMPLETE).
+constexpr uint32_t kOverlappedStatusPending = 0x00000103;
+constexpr uint32_t kWsaIoPending = 997;
+constexpr uint32_t kWsaIoIncomplete = 996;
+
 void LoadSockaddr(const uint8_t* ptr, sockaddr* out_addr) {
   out_addr->sa_family = memory::load_and_swap<uint16_t>(ptr + 0);
   switch (out_addr->sa_family) {
@@ -289,12 +295,15 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
                              ppc_ptr_t<XWSAOVERLAPPED> overlapped_ptr,
                              mapped_void completion_routine_ptr) {
   if (overlapped_ptr) {
-    // auto evt = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(
-    //    overlapped_ptr->event_handle);
-
-    // if (evt) {
-    //  //evt->Set(0, false);
-    //}
+    // An overlapped receive stays pending, as on a console that gets no packet: Internal holds
+    // STATUS_PENDING, the error is WSA_IO_PENDING, the event is left unsignaled, and
+    // WSAGetOverlappedResult answers WSA_IO_INCOMPLETE. (Rock Band 2 polls such a receive from a
+    // network thread; with WSAGetOverlappedResult a stub, every poll looked like a completed
+    // receive and was issued again at once.)
+    overlapped_ptr->internal = kOverlappedStatusPending;
+    overlapped_ptr->internal_high = 0;
+    XThread::SetLastError(kWsaIoPending);
+    return -1;
   }
 
   // we're not going to be receiving packets any time soon
@@ -308,7 +317,6 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
                            u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
                            ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len,
                            ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
-  assert(!overlapped);
   assert(!completion_routine);
 
   auto socket = LookupSocket(socket_handle);
@@ -334,11 +342,49 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
   }
 
   N_XSOCKADDR_IN native_to(to_ptr);
-  socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
+  int sent =
+      socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
 
-  // TODO: Instantly complete overlapped
+  // An overlapped send completes at once (the send above does not wait): Internal 0, the bytes in
+  // InternalHigh, the event signaled, for WSAGetOverlappedResult.
+  if (overlapped) {
+    overlapped->internal = 0;
+    overlapped->internal_high = sent > 0 ? uint32_t(sent) : 0;
+    if (overlapped->event_handle) {
+      xboxkrnl::xeNtSetEvent(overlapped->event_handle, nullptr);
+    }
+  }
 
   return 0;
+}
+
+// The state of an overlapped operation (WSARecvFrom, WSASendTo): Internal is STATUS_PENDING while it
+// runs, else its status, with the bytes in InternalHigh. A pending operation is reported incomplete
+// even when the caller asks to wait: the only pending one here is a receive that never completes
+// (WSARecvFrom), and waiting would hold the calling thread for good.
+u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
+                                        ppc_ptr_t<XWSAOVERLAPPED> overlapped,
+                                        mapped_u32 bytes_transferred, u32 wait,
+                                        mapped_u32 flags_ptr) {
+  if (!overlapped) {
+    XThread::SetLastError(0x2726);  // WSAEINVAL
+    return 0;
+  }
+  if (overlapped->internal == kOverlappedStatusPending) {
+    XThread::SetLastError(kWsaIoIncomplete);
+    return 0;
+  }
+  if (bytes_transferred) {
+    *bytes_transferred = overlapped->internal_high;
+  }
+  if (flags_ptr) {
+    *flags_ptr = 0;
+  }
+  if (overlapped->internal != 0) {
+    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(overlapped->internal));
+    return 0;
+  }
+  return 1;
 }
 
 u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32 wait_all,
@@ -1333,7 +1379,7 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
 REX_EXPORT_STUB(__imp__NetDll_UpnpStartup);
 REX_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
 REX_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
-REX_EXPORT_STUB(__imp__NetDll_WSAGetOverlappedResult);
+REX_EXPORT(__imp__NetDll_WSAGetOverlappedResult, rex::kernel::xam::NetDll_WSAGetOverlappedResult_entry)
 REX_EXPORT_STUB(__imp__NetDll_WSARecv);
 REX_EXPORT_STUB(__imp__NetDll_WSASend);
 REX_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
