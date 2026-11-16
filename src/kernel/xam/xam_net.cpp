@@ -394,12 +394,15 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
     return ~0u;
   }
 
-  uint64_t timeout_wait = (uint64_t)timeout;
+  // The timeout is in milliseconds (WSA_INFINITE: ~0); an NT wait takes 100-ns units, negative for a
+  // time from now. (It was passed as it was: a positive value is an absolute time, since 1601, so a
+  // few milliseconds was long past and every wait with a timeout ended at once.)
+  uint64_t timeout_wait = uint64_t(-int64_t(timeout) * 10000);
 
   X_STATUS result = 0;
   do {
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(num_events, events, wait_all, 1, alertable,
-                                                    timeout != -1 ? &timeout_wait : nullptr);
+                                                    timeout != ~0u ? &timeout_wait : nullptr);
   } while (result == X_STATUS_ALERTED);
 
   if (XFAILED(result)) {
@@ -407,7 +410,11 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
     XThread::SetLastError(error);
     return ~0u;
   }
-  return 0;
+  // Which event ended the wait, or that none did: WSA_WAIT_EVENT_0 + i, WSA_WAIT_TIMEOUT and
+  // WSA_WAIT_IO_COMPLETION are the NT wait's STATUS_WAIT_0 + i, STATUS_TIMEOUT and STATUS_USER_APC.
+  // (It answered 0, the first event, every time: Rock Band 2's network thread then took a receive
+  // that was still pending for a completed one and issued it again, in a loop.)
+  return result;
 }
 
 u32 NetDll_WSACreateEvent_entry() {
