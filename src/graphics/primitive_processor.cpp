@@ -278,6 +278,7 @@ void PrimitiveProcessor::ClearPerFrameCache() {
 
 bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
   SCOPE_profile_cpu_f("gpu");
+  const bool skip_index_request = std::exchange(skip_next_index_request_, false);
 
   const RegisterFile& regs = register_file_;
   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
@@ -906,9 +907,10 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
   }
 
   // Request the indices in the shared memory if they need to be accessed from
-  // there on the GPU.
-  if (cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA ||
-      cacheable.index_buffer_type == ProcessedIndexBufferType::kHostBuiltinForDMA) {
+  // there on the GPU (unless the caller did, SkipNextIndexRequest).
+  if (!skip_index_request &&
+      (cacheable.index_buffer_type == ProcessedIndexBufferType::kGuestDMA ||
+       cacheable.index_buffer_type == ProcessedIndexBufferType::kHostBuiltinForDMA)) {
     // Request the index buffer memory.
     // TODO(Triang3l): Shared memory request cache.
     if (!shared_memory_.RequestRange(guest_index_base, guest_index_buffer_needed_bytes)) {

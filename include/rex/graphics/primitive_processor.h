@@ -168,10 +168,17 @@ class PrimitiveProcessor {
   // Submission must be open to call (may request the index buffer in the shared
   // memory).
   bool Process(ProcessingResult& result_out);
+  // The next Process does not request its guest index range from the shared memory: the caller requested it already
+  // (NativeXRenderer's uploads ahead, which request the queued draws' vertex and index ranges at once). For that one
+  // call only.
+  void SkipNextIndexRequest() { skip_next_index_request_ = true; }
 
   // Invalidates the cache within the range.
   std::pair<uint32_t, uint32_t> MemoryInvalidationCallback(uint32_t physical_address_start,
                                                            uint32_t length, bool exact_range);
+
+ private:
+  bool skip_next_index_request_ = false;
 
  protected:
   // For host-side index buffer creation, the biggest possibly needed contiguous
