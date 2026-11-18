@@ -51,7 +51,7 @@ void ConfiguredVideoMode(uint32_t& width, uint32_t& height) {
 }
 
 float GetConfiguredVideoModeRefreshRate() {
-  double refresh_rate_hz = std::clamp(REXCVAR_GET(video_mode_refresh_rate), 24.0, 240.0);
+  double refresh_rate_hz = std::clamp(REXCVAR_GET(video_mode_refresh_rate), 24.0, 1000.0);
   return float(refresh_rate_hz);
 }
 
