@@ -30,6 +30,9 @@ class SDLAudioDriver : public AudioDriver {
   ~SDLAudioDriver() override;
 
   bool Initialize();
+  // Whether the output the driver would open (audio_output_device's, else Windows' default) has more than two
+  // channels, before it opens: OutputPlaysSurround's probe.
+  static bool ProbeOutputSurround();
   void SubmitFrame(uint32_t frame_ptr) override;
   bool CatchingUp() const override { return owed_frames_.load(std::memory_order_relaxed) != 0; }
   void Shutdown();

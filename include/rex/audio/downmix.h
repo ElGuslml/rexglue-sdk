@@ -71,9 +71,26 @@ float GetOutputGain();
 /// The player's choice of channels (audio_channels): kAuto passes the 5.1 render
 /// to a device of more than two channels and folds it for the others; kStereo
 /// folds it whatever the device; kMono folds it, then plays the same signal on
-/// both sides (one earphone, or one speaker).
-enum class OutputChannels { kAuto, kStereo, kMono };
+/// both sides (one earphone, or one speaker); kSurround ("surround") is kAuto's
+/// output, for a title told it plays 5.1 whatever the device
+/// (audio_speaker_config_from_output).
+enum class OutputChannels { kAuto, kStereo, kMono, kSurround };
 OutputChannels GetOutputChannels();
+
+/// Whether the output plays the 5.1 render as 5.1 (a device of more than two
+/// channels taken by audio_channels auto or surround). The output driver sets it
+/// when it opens; before that, the probe the audio system registers answers (a
+/// title asks for its speakers before its render client opens the output).
+void SetOutputPlaysSurround(bool surround);
+void SetOutputSurroundProbe(bool (*probe)());
+bool OutputPlaysSurround();
+
+/// Whether the title is told it has 5.1 speakers (XAudioGetSpeakerConfig's Dolby
+/// Digital): with audio_speaker_config_from_output, audio_channels surround, or
+/// auto where the output plays 5.1; always without it. The render stays 5.1
+/// either way (a Guitar Hero mixes the same six channels, its Dolby setting only
+/// moving its timing and its speaker test), and the output folds it as before.
+bool TitleMixesSurround();
 
 /// The game's window lost or got the focus: with audio_mute_unfocused the output
 /// stage plays silence while it is in the background. Safe from any thread.

@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/audio/downmix.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
@@ -33,6 +34,14 @@ SDLAudioSystem::~SDLAudioSystem() {}
 
 void SDLAudioSystem::Initialize() {
   AudioSystem::Initialize();
+  // A title asks for its speakers before its render client opens the output (audio_speaker_config_from_output).
+#if REX_PLATFORM_WIN32
+  if (REXCVAR_GET(audio_wasapi_exclusive)) {
+    SetOutputSurroundProbe([] { return false; });  // stereo only, unless it falls back to the shared output
+    return;
+  }
+#endif
+  SetOutputSurroundProbe(&SDLAudioDriver::ProbeOutputSurround);
 }
 
 X_STATUS SDLAudioSystem::CreateDriver([[maybe_unused]] size_t index,
