@@ -50,6 +50,36 @@ SDLAudioDriver::~SDLAudioDriver() {
   assert_true(frames_unused_.empty());
 }
 
+namespace {
+
+// audio_output_device's playback device, else Windows' default (SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK).
+SDL_AudioDeviceID FindOutputDevice(const std::string& wanted) {
+  SDL_AudioDeviceID target = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+  if (wanted.empty()) return target;
+  int count = 0;
+  SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count);
+  for (int i = 0; ids && i < count; ++i) {
+    const char* name = SDL_GetAudioDeviceName(ids[i]);
+    if (name && wanted == name) {
+      target = ids[i];
+      break;
+    }
+  }
+  SDL_free(ids);
+  return target;
+}
+
+}  // namespace
+
+bool SDLAudioDriver::ProbeOutputSurround() {
+  if (GetOutputChannels() != OutputChannels::kAuto && GetOutputChannels() != OutputChannels::kSurround) return false;
+  if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) return false;
+  SDL_AudioSpec spec = {};
+  const bool known = SDL_GetAudioDeviceFormat(FindOutputDevice(GetOutputDeviceName()), &spec, nullptr);
+  SDL_QuitSubSystem(SDL_INIT_AUDIO);
+  return known && spec.channels > 2;
+}
+
 bool SDLAudioDriver::Initialize() {
   // Set audio category for proper OS audio handling
   SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
@@ -65,19 +95,9 @@ bool SDLAudioDriver::Initialize() {
 
   // The player's output (audio_output_device): a playback device of that name, else Windows' default one, which SDL
   // follows when it changes.
-  SDL_AudioDeviceID target = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
   const std::string wanted = GetOutputDeviceName();
+  SDL_AudioDeviceID target = FindOutputDevice(wanted);
   if (!wanted.empty()) {
-    int count = 0;
-    SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count);
-    for (int i = 0; ids && i < count; ++i) {
-      const char* name = SDL_GetAudioDeviceName(ids[i]);
-      if (name && wanted == name) {
-        target = ids[i];
-        break;
-      }
-    }
-    SDL_free(ids);
     if (target == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK) {
       REXAPU_WARN("audio_output_device '{}' not found: the default output", wanted);
     }
@@ -90,7 +110,8 @@ bool SDLAudioDriver::Initialize() {
   SDL_AudioSpec obtained_spec = {};
   desired_spec.freq = frame_frequency_;
   desired_spec.format = SDL_AUDIO_F32LE;
-  desired_spec.channels = channels == OutputChannels::kAuto ? frame_channels_ : 2;
+  desired_spec.channels =
+      channels == OutputChannels::kAuto || channels == OutputChannels::kSurround ? frame_channels_ : 2;
   sdl_device_channels_ = uint8_t(desired_spec.channels);
   sdl_stream_ = SDL_OpenAudioDeviceStream(target, &desired_spec, SDLCallback, this);
   if (!sdl_stream_) {
@@ -128,6 +149,7 @@ bool SDLAudioDriver::Initialize() {
     }
   }
 
+  SetOutputPlaysSurround(sdl_device_channels_ == 6);
   // The endpoint layout decides which mix the callback runs, and it is the
   // first thing worth knowing when a report says the balance is wrong on one
   // speaker setup and right on another.

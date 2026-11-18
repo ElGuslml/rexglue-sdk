@@ -412,6 +412,7 @@ void WasapiExclusiveDriver::Output::RenderThread(std::promise<bool> opened) {
   REXAPU_INFO("audio_wasapi_exclusive: '{}' in exclusive mode, 48 kHz stereo {}, {:.1f} ms kept in a {:.1f} ms buffer",
               device_name_, device.sample.name, device.target_frames * 1000.0 / kRate,
               device.buffer_frames * 1000.0 / kRate);
+  SetOutputPlaysSurround(false);  // stereo only
   opened.set_value(true);
 
   bool lost = false;

@@ -71,8 +71,9 @@ REXCVAR_DEFINE_STRING(resolution, "", "Display",
                       "example: 720p, 1080p, 1440p, 4k, 1280x720)");
 
 REXCVAR_DEFINE_DOUBLE(video_mode_refresh_rate, 60.0, "Display",
-                      "Guest video mode refresh rate in Hz")
-    .range(24.0, 240.0)
+                      "Guest video mode refresh rate in Hz (up to 1000: above a display's refresh rate, with V-Sync "
+                      "off)")
+    .range(24.0, 1000.0)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex {

@@ -485,7 +485,10 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
           // vblank_timer_spin_us of spinning (700: 8.30 to 8.36 ms; measured on Gustavo's PC). One wake a tick, not
           // one a millisecond. A tick far away (vsync turned on, a long stall) is waited for in steps, so the
           // display's checks above keep their second.
-          const int32_t spin_us = REXCVAR_GET(vsync) ? std::clamp(REXCVAR_GET(vblank_timer_spin_us), 0, 2000) : 0;
+          // At most a quarter of a tick: at 1000 Hz 700 us of spinning would be most of every tick's thread time.
+          const int32_t quarter_us = int32_t(interval_ticks * 250000 / guest_tick_frequency);
+          const int32_t spin_us =
+              REXCVAR_GET(vsync) ? std::min(std::clamp(REXCVAR_GET(vblank_timer_spin_us), 0, 2000), quarter_us) : 0;
           const uint64_t next = last_frame_time + interval_ticks;
           current_time = chrono::Clock::QueryGuestTickCount();
           if (!REXCVAR_GET(vsync) || next <= current_time) {

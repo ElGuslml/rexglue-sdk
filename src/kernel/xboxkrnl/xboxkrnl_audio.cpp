@@ -12,7 +12,10 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <atomic>
+
 #include <rex/audio/audio_system.h>
+#include <rex/audio/downmix.h>
 #include <rex/audio/usb_microphone.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
@@ -25,8 +28,17 @@
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
 
+// Dolby Digital (bit 16, the game then mixes 5.1) with the analog output's low word; the analog output alone without
+// it. audio_speaker_config_from_output (audio/downmix.cpp) gives Dolby Digital only where the output plays 5.1.
 u32 XAudioGetSpeakerConfig_entry(mapped_u32 config_ptr) {
-  *config_ptr = 0x00010001;
+  const bool surround = rex::audio::TitleMixesSurround();
+  const uint32_t config = surround ? 0x00010001 : 0x00000001;
+  static std::atomic<uint32_t> logged{0xFFFFFFFFu};
+  if (logged.exchange(config) != config) {
+    REXKRNL_INFO("XAudioGetSpeakerConfig: {:#010x} ({})", config,
+                 surround ? "Dolby Digital 5.1" : "two speakers, no Dolby Digital");
+  }
+  *config_ptr = config;
   return X_ERROR_SUCCESS;
 }
 
