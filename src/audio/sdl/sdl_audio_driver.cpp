@@ -32,6 +32,12 @@ REXCVAR_DEFINE_BOOL(audio_keep_time, false, "Audio",
                     "by dropping one of the game's next frames (while the device has another of them to play), a short "
                     "skip instead of the sound staying that much behind (a music game's notes do not wait). Off: the "
                     "silence delays the rest of the sound");
+REXCVAR_DEFINE_BOOL(audio_keep_time_device_gaps, true, "Audio",
+                    "With audio_keep_time: a gap in the device's own output is made up too. When the device's callback "
+                    "comes late and the device runs dry, it plays the gap and then the game's sound, late by that much "
+                    "for good, though no frame was missing from the queue. The frames given to the device are compared "
+                    "with the time that passed, and when they fall behind and stay behind (4 ms or more from one "
+                    "1.5 s window to the next), as many of the game's next frames are dropped");
 
 namespace rex::audio::sdl {
 
@@ -40,6 +46,10 @@ namespace {
 constexpr uint32_t kMaxOwedFrames = 375;
 // Silence counts only while the client submits: within this of its last frame.
 constexpr auto kClientActive = std::chrono::milliseconds(500);
+// The device's gaps: a window's length and least calls, and the least rise of its lowest lateness taken for a gap.
+constexpr auto kGapWindow = std::chrono::milliseconds(1500);
+constexpr uint32_t kGapWindowCalls = 32;
+constexpr double kGapLeastMs = 4.0;
 }  // namespace
 
 SDLAudioDriver::SDLAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
@@ -225,6 +235,60 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
   }
 }
 
+// audio_keep_time_device_gaps. The device asks for frames as it plays them, so the frames given so far are the time it
+// has played, give or take what it buffers. Each call's lateness is its time less that played time: it moves by a
+// frame or so from call to call (the device takes one or two at once, its thread wakes a little late), but its least
+// value over a window is steady, and slides only with the device's clock against the host's (well under 0.2 ms a
+// window). When the device's thread is held up until the device runs dry, the device plays nothing for a while and
+// then goes on from where it was: every later call is that much later than its frames, so the window's least value
+// steps up by the gap. A callback that only came late, the device not dry, is followed by an early one and leaves the
+// least value where it was. The step, in whole frames, is owed as the silences of an empty queue are.
+void SDLAudioDriver::WatchDeviceGaps(std::chrono::steady_clock::time_point now) {
+  constexpr double kFrameMs = channel_samples_ * 1000.0 / frame_frequency_;
+  if (given_since_ == std::chrono::steady_clock::time_point{}) {
+    given_since_ = now;
+    given_frames_ = 0;
+    gap_window_since_ = now;
+    gap_window_calls_ = 0;
+    gap_last_valid_ = false;
+  }
+  const double lateness =
+      std::chrono::duration<double, std::milli>(now - given_since_).count() - double(given_frames_) * kFrameMs;
+  if (gap_window_calls_ == 0 || lateness < gap_window_least_) {
+    gap_window_least_ = lateness;
+  }
+  if (++gap_window_calls_ < kGapWindowCalls || now - gap_window_since_ < kGapWindow) {
+    return;
+  }
+  const double rise = gap_window_least_ - gap_last_least_;
+  const bool compare = gap_last_valid_;
+  gap_last_least_ = gap_window_least_;
+  gap_last_valid_ = true;
+  gap_window_since_ = now;
+  gap_window_calls_ = 0;
+  if (!compare || rise < kGapLeastMs) {
+    return;
+  }
+  // Whole frames are dropped: what the rounding leaves goes into the next gap's count, so the gaps of a session do not
+  // add up to an error (a 20 ms gap is 3.75 frames: 4 dropped, 1.3 ms too many each time).
+  const double owing = rise + gap_carry_ms_;
+  const uint32_t frames = owing > 0.0 ? uint32_t(owing / kFrameMs + 0.5) : 0;
+  gap_carry_ms_ = owing - double(frames) * kFrameMs;
+  bool active;
+  {
+    std::unique_lock<std::mutex> guard(frames_mutex_);
+    active = last_submit_ != std::chrono::steady_clock::time_point{} && now - last_submit_ < kClientActive;
+  }
+  if (active) {
+    const uint32_t owed = owed_frames_.load(std::memory_order_relaxed);
+    owed_frames_.fetch_add(std::min(frames, kMaxOwedFrames - std::min(owed, kMaxOwedFrames)),
+                           std::memory_order_relaxed);
+  }
+  REXAPU_INFO("audio_keep_time: the device's output fell {:.1f} ms behind the frames it was given (a gap in its own "
+              "output): {} frames of the game's sound {}",
+              rise, frames, active ? "to be dropped" : "not dropped, the game is not playing sound");
+}
+
 void SDLAudioDriver::Shutdown() {
   if (sdl_stream_) {
     SDL_DestroyAudioStream(sdl_stream_);
@@ -253,6 +317,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     return;
   }
   const auto driver = static_cast<SDLAudioDriver*>(userdata);
+  if (REXCVAR_GET(audio_keep_time) && REXCVAR_GET(audio_keep_time_device_gaps)) {
+    driver->WatchDeviceGaps(std::chrono::steady_clock::now());
+  }
   const int sample_count =
       static_cast<int>(channel_samples_ * std::max<uint8_t>(driver->sdl_device_channels_, 1));
   const int len = static_cast<int>(sizeof(float) * sample_count);
@@ -322,6 +389,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       additional_amount -= len;
     }
   }
+  driver->given_frames_ += taken;
   if (taken > driver->burst_frames_.load(std::memory_order_relaxed)) {
     driver->burst_frames_.store(taken, std::memory_order_relaxed);
   }
