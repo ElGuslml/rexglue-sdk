@@ -64,15 +64,20 @@ void RecomputeGuestTickScalar() {
 // Update the guest timer for all threads.
 // Return a copy of the value so locking is reduced.
 uint64_t UpdateGuestClock() {
-  uint64_t host_tick_count = Clock::QueryHostTickCount();
-
   if (REXCVAR_GET(clock_no_scaling)) {
     // Nothing to update, calculate on the fly
-    return host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second;
+    return Clock::QueryHostTickCount() * guest_tick_ratio_.first / guest_tick_ratio_.second;
   }
 
   std::unique_lock<std::mutex> lock(tick_mutex_, std::defer_lock);
   if (lock.try_lock()) {
+    // The host's count is read with the mutex held. Read before it, a thread that lost the processor between its
+    // read and the lock came in with a count older than the one another thread had stored meanwhile: it added
+    // nothing, but stored its older count, and the next update added the time between the two again. The guest's
+    // clock gained that much at every such race: 200 to 260 ppm with the vertical blank timer spinning on this clock
+    // while the game's threads read the time base (a game with V-Sync off at 480 Hz; its clocks went ahead of the
+    // audio by about 14 ms a minute).
+    uint64_t host_tick_count = Clock::QueryHostTickCount();
     // Translate host tick count to guest tick count.
     uint64_t host_tick_delta =
         host_tick_count > last_host_tick_count_ ? host_tick_count - last_host_tick_count_ : 0;

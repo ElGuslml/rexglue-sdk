@@ -64,6 +64,19 @@ class SDLAudioDriver : public AudioDriver {
   // The most frames SDL has taken in one call (2 on a 10 ms WASAPI period): as many stay queued while catching up.
   std::atomic<uint32_t> burst_frames_{1};
   std::chrono::steady_clock::time_point last_submit_ = {};
+
+  // audio_keep_time_device_gaps: the frames given to the device against the steady clock, read and written by the
+  // device's callback only. Each call's time less the time its frames so far last; its least value over a window is
+  // where the device stands, and a rise from one window to the next is a gap in the device's output (WatchDeviceGaps).
+  void WatchDeviceGaps(std::chrono::steady_clock::time_point now);
+  uint64_t given_frames_ = 0;
+  std::chrono::steady_clock::time_point given_since_ = {};
+  std::chrono::steady_clock::time_point gap_window_since_ = {};
+  uint32_t gap_window_calls_ = 0;
+  double gap_window_least_ = 0.0;
+  double gap_last_least_ = 0.0;
+  bool gap_last_valid_ = false;
+  double gap_carry_ms_ = 0.0;  // of the gaps made up so far, the part not in whole frames
 };
 
 }  // namespace rex::audio::sdl
