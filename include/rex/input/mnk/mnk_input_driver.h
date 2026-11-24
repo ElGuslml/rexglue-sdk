@@ -52,6 +52,10 @@ class MnkInputDriver final : public InputDriver,
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
+  /// The keyboard's pad in a song on Guitar Hero III's layout (keyboard_guitar_layout = "gh3"): the controls that
+  /// layout reads, from the keys of the pad's (frets on A, B, Y, X and LB's keys, the open note on RB's, Star Power on
+  /// Back's, the whammy bar on the right stick's), no D-pad and no tap.
+  X_RESULT GetDeviceSongState(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;
   X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) override;
@@ -98,6 +102,8 @@ class MnkInputDriver final : public InputDriver,
   /// sources pressed within mnk_tap_window_ms making one press. Takes and returns the pad's
   /// buttons; call with state_mutex_ held, once per evaluation of the state.
   uint16_t ApplyTapLocked(uint16_t buttons);
+  /// GetDeviceState and GetDeviceSongState: the pad's state from the keys (`song`: Guitar Hero III's layout's).
+  X_RESULT ReadState(DeviceId id, X_INPUT_STATE* out_state, bool song);
 
   // Called from the guest thread. The rest of the capture path stays on the UI
   // thread, since every Window call in it reaches SDL.

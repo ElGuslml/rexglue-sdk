@@ -49,6 +49,7 @@ struct DeviceInfo {
   uint8_t subtype = 0x01;  // XINPUT_DEVSUBTYPE_*
   GamepadType gamepad_type = GamepadType::kUnknown;
   bool synthetic = false;  // keyboard/mouse emulation or the NOP stand-in
+  bool keyboard = false;   // the keyboard's pad (the MnK driver's emulated controller), synthetic too
   // Its right stick's X axis is a whammy bar already, -32768 at rest: calibrated (gamepad_whammy_calibration), or a
   // gamepad's found resting there (a guitar that reports itself as a gamepad). Not folded as a stick's
   // (gamepad_whammy_rest).

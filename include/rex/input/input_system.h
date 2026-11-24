@@ -125,7 +125,8 @@ class InputSystem : public system::IInputSystem {
   /// on Guitar Hero III's layout (Gh3LayoutDevice) as it is.
   /// True when its right stick's X is then a whammy bar at rest at -32768 (a real guitar's too), for the merge.
   bool PlayAsGuitar(const DeviceInfo& device, X_INPUT_GAMEPAD* gamepad);
-  /// gamepad_guitar_layout = "gh3" and a real gamepad the game is told is a guitar.
+  /// gamepad_guitar_layout = "gh3" and a real gamepad the game is told is a guitar, or keyboard_guitar_layout = "gh3"
+  /// and the keyboard's pad the game is told is a guitar.
   static bool Gh3LayoutDevice(const DeviceInfo& device);
   X_INPUT_VIBRATION ModifyVibrationLevel(const X_INPUT_VIBRATION* vibration) const;
 
