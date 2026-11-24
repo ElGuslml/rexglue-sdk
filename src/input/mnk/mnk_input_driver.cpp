@@ -488,6 +488,7 @@ void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
   info.subtype =
       IsPassthroughEnabled() ? XINPUT_DEVSUBTYPE_USB_KEYBOARD : XINPUT_DEVSUBTYPE_GAMEPAD;
   info.synthetic = true;
+  info.keyboard = true;
   out.push_back(info);
 }
 
@@ -530,6 +531,14 @@ uint16_t MnkInputDriver::ApplyTapLocked(uint16_t buttons) {
 }
 
 X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+  return ReadState(id, out_state, false);
+}
+
+X_RESULT MnkInputDriver::GetDeviceSongState(DeviceId id, X_INPUT_STATE* out_state) {
+  return ReadState(id, out_state, true);
+}
+
+X_RESULT MnkInputDriver::ReadState(DeviceId id, X_INPUT_STATE* out_state, bool song) {
   if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
@@ -630,6 +639,46 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   auto clamp16 = [](int32_t v) -> int16_t {
     return static_cast<int16_t>(std::clamp(v, (int32_t)INT16_MIN, (int32_t)INT16_MAX));
   };
+
+  if (song) {
+    // Guitar Hero III's layout in a song (the input system asks only then: keyboard_guitar_layout = "gh3", the game's
+    // tap gate open), on the keys the player gave the pad's controls, as the SDL driver's GetDeviceSongState gives a
+    // controller's: green on LT, red on LB, yellow on RB, blue on RT, orange on A, the open note on B, Star Power on
+    // Back. The keyboard's frets are its A, B, Y, X and LB keys (an Xbox 360 guitar's green, red, yellow, blue and
+    // orange), so each goes where that layout reads the fret, and RB's key, a guitar's nothing, is the open note.
+    // The D-pad's keys, the guitar's strum, do nothing here (on this layout the D-pad is Star Power: every strum
+    // would be one); the tap (mnk_tap_target) does not act, a fret pressed already plays. Start stays the menus'.
+    // The pause menu, outside the gate, gets the pad's controls again.
+    const uint16_t keys = buttons;
+    uint16_t song_buttons = 0;
+    if (keys & X_INPUT_GAMEPAD_START) song_buttons |= X_INPUT_GAMEPAD_START;
+    if (keys & X_INPUT_GAMEPAD_B) song_buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
+    if (keys & X_INPUT_GAMEPAD_Y) song_buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+    if (keys & X_INPUT_GAMEPAD_LEFT_SHOULDER) song_buttons |= X_INPUT_GAMEPAD_A;
+    if (keys & X_INPUT_GAMEPAD_RIGHT_SHOULDER) song_buttons |= X_INPUT_GAMEPAD_B;
+    if (keys & X_INPUT_GAMEPAD_BACK) song_buttons |= X_INPUT_GAMEPAD_BACK;
+    // The whammy bar: the right stick's keys (a guitar's bar on its X; not the mouse's look), all or nothing, as a key
+    // gives it; the sticks otherwise at the game's own centre, as the SDL driver's (Guitar Hero III's code reads an
+    // axis as a byte, (x + 32767) >> 8 and (32767 - y) >> 8, so XInput's 0 is one short of its centre and a left stick
+    // at 0 took the bar from it, which then never moved).
+    constexpr int16_t kCentreX = 1;
+    constexpr int16_t kCentreY = -1;
+    const bool whammy = pressed(REXCVAR_GET(keybind_rstick_left)) || pressed(REXCVAR_GET(keybind_rstick_right)) ||
+                        pressed(REXCVAR_GET(keybind_rstick_up)) || pressed(REXCVAR_GET(keybind_rstick_down));
+    tap_.Apply(0, 0, 0, 0, 0);  // the tap's state let go: the frets held are not new presses when the song ends
+    packet_number_++;
+    if (out_state) {
+      out_state->packet_number = packet_number_;
+      out_state->gamepad.buttons = song_buttons;
+      out_state->gamepad.left_trigger = (keys & X_INPUT_GAMEPAD_A) ? 0xFF : 0;
+      out_state->gamepad.right_trigger = (keys & X_INPUT_GAMEPAD_X) ? 0xFF : 0;
+      out_state->gamepad.thumb_lx = kCentreX;
+      out_state->gamepad.thumb_ly = kCentreY;
+      out_state->gamepad.thumb_rx = whammy ? INT16_MAX : kCentreX;
+      out_state->gamepad.thumb_ry = kCentreY;
+    }
+    return X_ERROR_SUCCESS;
+  }
 
   buttons = ApplyTapLocked(buttons);
 
