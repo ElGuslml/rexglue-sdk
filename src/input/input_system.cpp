@@ -88,7 +88,8 @@ REXCVAR_DEFINE_STRING(gamepad_device_guitar_layout, "", "Input",
                       "else its SDL GUID). One not named plays on gamepad_guitar_layout's. A launcher writes it");
 REXCVAR_DEFINE_STRING(keyboard_guitar_layout, "", "Input",
                       "gamepad_guitar_layout for the keyboard's pad (mnk_mode, not mnk_passthrough) when the game is "
-                      "told it is a guitar: gh3 = Guitar Hero III's controller layout, played by the game's own "
+                      "told it is a guitar, or a gamepad (Guitar Hero III's engine, which plays a controller on that "
+                      "layout itself): gh3 = Guitar Hero III's controller layout, played by the game's own "
                       "controller code (rex::input::PlaysGh3Layout), the frets on the keys of A, B, Y, X and LB "
                       "(green, red, yellow, blue, orange), the open note on RB's, Star Power on Back's, the whammy "
                       "bar on the right stick's; in a song the D-pad's keys do nothing (no strum: a fret pressed "
@@ -517,12 +518,17 @@ DeviceInfo InputSystem::GetActiveDevice(uint32_t user_index) {
 
 bool InputSystem::Gh3LayoutDevice(const DeviceInfo& device) {
   // The keyboard's pad: its own setting, keyboard_guitar_layout, when the game is told it is a guitar
-  // (gamepad_subtype, or gamepad_device_subtypes' "keyboard" entry: not while it sings or plays drums). Its driver
-  // gives the layout's controls in a song (MnkInputDriver::GetDeviceSongState). The NOP stand-in plays nothing.
+  // (gamepad_subtype, or gamepad_device_subtypes' "keyboard" entry: not while it sings or plays drums), or a gamepad:
+  // Guitar Hero III's own engine (Guitar Hero: Aerosmith) plays a controller on that layout with no hook, so its
+  // keyboard keeps a guitar's keys in the menus (green selects, red goes back) and plays a song on the layout. Its
+  // driver gives the layout's controls in a song (MnkInputDriver::GetDeviceSongState). The NOP stand-in plays nothing.
   if (device.synthetic) {
-    return device.keyboard && device.subtype == XINPUT_DEVSUBTYPE_GAMEPAD &&
-           EqualsIgnoringCase(REXCVAR_GET(keyboard_guitar_layout), "gh3") &&
-           IsGuitarSubtype(ReportedSubtype(&device, device.subtype));
+    if (!device.keyboard || device.subtype != XINPUT_DEVSUBTYPE_GAMEPAD ||
+        !EqualsIgnoringCase(REXCVAR_GET(keyboard_guitar_layout), "gh3")) {
+      return false;
+    }
+    const uint8_t reported = ReportedSubtype(&device, device.subtype);
+    return IsGuitarSubtype(reported) || reported == XINPUT_DEVSUBTYPE_GAMEPAD;
   }
   // A real controller the game is told is a guitar (not a real guitar, a drum kit or a controller set to sing or play
   // drums), and not a guitar SDL takes for a controller (its whammy bar found resting or calibrated).
