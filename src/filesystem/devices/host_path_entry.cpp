@@ -116,7 +116,10 @@ std::unique_ptr<Entry> HostPathEntry::CreateEntryInternal(const std::string_view
 }
 
 bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
-  auto full_path = host_path_ / rex::to_path(entry->name());
+  // An overlay's entry (HostPathDevice::MergeOverlay) at its own host path, not under this one's.
+  const auto* host_entry = static_cast<const HostPathEntry*>(entry);
+  auto full_path = host_entry->from_overlay() ? host_entry->host_path()
+                                              : host_path_ / rex::to_path(entry->name());
   std::error_code ec;  // avoid exception on remove/remove_all failure
   if (entry->attributes() & kFileAttributeDirectory) {
     // Delete entire directory and contents.
@@ -134,6 +137,12 @@ bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
 }
 
 X_STATUS HostPathEntry::RenameEntryInternal(const std::vector<std::string_view>& path_parts) {
+  // An overlay's file (HostPathDevice::MergeOverlay) is not the guest's to move.
+  if (from_overlay_) {
+    REXFS_WARN("RenameEntryInternal: '{}' comes from a game data overlay: not renamed",
+               rex::path_to_utf8(host_path_));
+    return X_STATUS_ACCESS_DENIED;
+  }
   auto new_host_path = static_cast<HostPathDevice*>(device_)->host_path();
   for (const auto& path_part : path_parts) {
     new_host_path /= rex::to_path(path_part);

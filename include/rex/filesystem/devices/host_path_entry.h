@@ -31,6 +31,10 @@ class HostPathEntry : public Entry {
                                rex::filesystem::FileInfo file_info);
 
   const std::filesystem::path& host_path() const { return host_path_; }
+  // Made by HostPathDevice::MergeOverlay: its file or directory is an overlay's, not under its
+  // parent's host path. Such an entry is checked and deleted at its own host path and never
+  // renamed; every other entry behaves as before.
+  bool from_overlay() const { return from_overlay_; }
 
   X_STATUS Open(uint32_t desired_access, File** out_file) override;
   bool Truncate() override;
@@ -53,6 +57,7 @@ class HostPathEntry : public Entry {
   X_STATUS RenameEntryInternal(const std::vector<std::string_view>& path_parts) override;
 
   std::filesystem::path host_path_;
+  bool from_overlay_ = false;
 };
 
 }  // namespace rex::filesystem

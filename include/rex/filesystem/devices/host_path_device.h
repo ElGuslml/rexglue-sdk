@@ -29,6 +29,13 @@ class HostPathDevice : public Device {
   void Dump(string::StringBuffer* string_buffer) override;
   Entry* ResolvePath(const std::string_view path) override;
 
+  // Merges the tree under @p overlay_root into the one Initialize populated: a file there
+  // answers for the entry at the same path (names matched case-insensitively) with its own host
+  // path, size and timestamps, and what the tree lacks is added. Called once per overlay after
+  // Initialize, a later overlay winning over an earlier one. False, with nothing changed, when
+  // @p overlay_root is not a directory.
+  bool MergeOverlay(const std::filesystem::path& overlay_root);
+
   bool is_read_only() const override { return read_only_; }
   // NOTE(tomc): When true, host file handles open with FILE_SHARE_DELETE so an open read
   // handle (e.g. a save-slot preview) does not block an overwrite's
@@ -47,7 +54,15 @@ class HostPathDevice : public Device {
   uint32_t bytes_per_sector() const override { return 0x200; }
 
  private:
+  struct OverlayCounts {
+    uint32_t files_shadowed = 0;
+    uint32_t files_added = 0;
+    uint32_t directories_added = 0;
+  };
+
   void PopulateEntry(HostPathEntry* parent_entry);
+  void MergeOverlayEntry(HostPathEntry* parent_entry, const std::filesystem::path& overlay_path,
+                         OverlayCounts& counts);
 
   std::string name_;
   std::filesystem::path host_path_;

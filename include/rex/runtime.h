@@ -36,6 +36,7 @@ struct PPCFuncMapping;
 #include <rex/image_info.h>
 
 REXCVAR_DECLARE(std::string, game_data_root);
+REXCVAR_DECLARE(std::string, game_data_overlays);
 REXCVAR_DECLARE(std::string, user_data_root);
 REXCVAR_DECLARE(std::string, update_data_root);
 REXCVAR_DECLARE(std::string, cache_root);

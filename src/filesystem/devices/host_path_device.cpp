@@ -126,4 +126,63 @@ void HostPathDevice::PopulateEntry(HostPathEntry* parent_entry) {
   }
 }
 
+bool HostPathDevice::MergeOverlay(const std::filesystem::path& overlay_root) {
+  std::error_code ec;
+  if (!std::filesystem::is_directory(overlay_root, ec)) {
+    return false;
+  }
+
+  OverlayCounts counts;
+  MergeOverlayEntry(static_cast<HostPathEntry*>(root_entry_.get()), overlay_root, counts);
+  REXFS_INFO(
+      "Overlay {} on {}: {} files shadow existing ones, {} files added, {} directories added",
+      rex::path_to_utf8(overlay_root), mount_path(), counts.files_shadowed, counts.files_added,
+      counts.directories_added);
+  return true;
+}
+
+void HostPathDevice::MergeOverlayEntry(HostPathEntry* parent_entry,
+                                       const std::filesystem::path& overlay_path,
+                                       OverlayCounts& counts) {
+  for (auto& child_info : rex::filesystem::ListFiles(overlay_path)) {
+    const auto child_host_path = overlay_path / child_info.name;
+    const bool is_directory = child_info.type == rex::filesystem::FileInfo::Type::kDirectory;
+    auto* existing = parent_entry->GetChild(rex::path_to_utf8(child_info.name));
+
+    // A directory the tree has already is merged into, its entry kept.
+    if (existing && is_directory && (existing->attributes() & kFileAttributeDirectory)) {
+      MergeOverlayEntry(static_cast<HostPathEntry*>(existing), child_host_path, counts);
+      continue;
+    }
+
+    // Anything else the overlay has replaces the entry, in its place in the parent's list (a
+    // directory listing keeps its order) and under its name (its casing too). A file and a
+    // directory of the same name: the overlay's wins as well.
+    const bool shadows = existing != nullptr;
+    if (shadows) {
+      child_info.name = rex::to_path(existing->name());
+    }
+    auto* child = HostPathEntry::Create(this, parent_entry, child_host_path, child_info);
+    child->from_overlay_ = true;
+    if (shadows) {
+      auto it = std::find_if(parent_entry->children_.begin(), parent_entry->children_.end(),
+                             [existing](const auto& entry) { return entry.get() == existing; });
+      it->reset(child);
+    } else {
+      parent_entry->children_.push_back(std::unique_ptr<Entry>(child));
+    }
+
+    if (is_directory) {
+      ++counts.directories_added;
+      MergeOverlayEntry(child, child_host_path, counts);
+    } else if (shadows) {
+      ++counts.files_shadowed;
+      REXFS_DEBUG("  {} shadowed by {}", child->path(), rex::path_to_utf8(child_host_path));
+    } else {
+      ++counts.files_added;
+      REXFS_DEBUG("  {} added from {}", child->path(), rex::path_to_utf8(child_host_path));
+    }
+  }
+}
+
 }  // namespace rex::filesystem

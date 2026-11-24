@@ -11,6 +11,7 @@
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/filesystem/devices/host_path_device.h>
 #include <rex/filesystem/devices/null_device.h>
 #include <rex/filesystem/vfs.h>
@@ -20,6 +21,7 @@
 #include <rex/platform/exceptions.h>  // SEH exception support
 #include <rex/kernel/crt/heap.h>
 #include <rex/runtime.h>
+#include <rex/string/utf8.h>
 #include <rex/system/export_resolver.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/function_dispatcher.h>
@@ -29,6 +31,9 @@
 #include <rex/thread.h>
 
 REXCVAR_DEFINE_STRING(game_data_root, "", "Runtime", "Override game data path");
+REXCVAR_DEFINE_STRING(game_data_overlays, "", "Runtime",
+                      "Folders whose files shadow the game data's, separated by '|' (a later "
+                      "folder wins over an earlier one)");
 REXCVAR_DEFINE_STRING(user_data_root, "", "Runtime", "Override user data path");
 REXCVAR_DEFINE_STRING(update_data_root, "", "Runtime", "Override update data path");
 REXCVAR_DEFINE_STRING(cache_root, "", "Runtime", "Override shader cache path");
@@ -311,6 +316,17 @@ bool Runtime::SetupVfs() {
   if (!device->Initialize()) {
     REXSYS_ERROR("Runtime::SetupVfs: Failed to initialize host path device");
     return false;
+  }
+  // Game data overlays: a file in one answers for the game's own at the same path, a later
+  // folder's over an earlier one's. A folder that is not there never fails the start.
+  const std::string overlays = REXCVAR_GET(game_data_overlays);
+  for (const auto overlay : rex::string::utf8_split(overlays, "|", true)) {
+    std::error_code ec;
+    const auto abs_overlay = std::filesystem::absolute(rex::to_path(overlay), ec);
+    if (ec || !device->MergeOverlay(abs_overlay)) {
+      REXSYS_WARN("Runtime::SetupVfs: game data overlay is not a directory, skipped: {}",
+                  ec ? std::string(overlay) : rex::path_to_utf8(abs_overlay));
+    }
   }
   if (!file_system_->RegisterDevice(std::move(device))) {
     REXSYS_ERROR("Runtime::SetupVfs: Failed to register host path device");
