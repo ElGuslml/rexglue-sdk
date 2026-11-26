@@ -238,7 +238,12 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
     if (parent_entry) {
       const auto* host_path_entry = dynamic_cast<const HostPathEntry*>(parent_entry);
       if (host_path_entry) {
-        const auto file_path = host_path_entry->host_path() / rex::to_path(entry->name());
+        // An overlay's file (HostPathDevice::MergeOverlay) at its own host path, not under its
+        // parent's.
+        const auto* own = dynamic_cast<const HostPathEntry*>(entry);
+        const auto file_path = own && own->from_overlay()
+                                   ? own->host_path()
+                                   : host_path_entry->host_path() / rex::to_path(entry->name());
         if (!std::filesystem::exists(file_path)) {
           entry->Delete();
           entry = nullptr;
