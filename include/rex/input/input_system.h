@@ -54,6 +54,9 @@ class InputSystem : public system::IInputSystem {
   X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);
   /// GetState for the emulator's own UI, which reads while the guest is blocked.
   X_RESULT GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state);
+  /// The user's real controllers for a UI that takes text (the on-screen keyboard, rex/ui/overlay/keyboard_prompt.h):
+  /// without the keyboard's pad, whose keys are typed there, and as plain pads (no guitar or song layout).
+  X_RESULT GetControllersForUI(uint32_t user_index, X_INPUT_STATE* out_state);
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
 

@@ -19,6 +19,9 @@
 
 REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
                     "Don't display any UI, using defaults for prompts as needed");
+REXCVAR_DEFINE_BOOL(virtual_keyboard, true, "UI",
+                    "The text a game asks the console for (a name) is typed on an on-screen keyboard, with the "
+                    "controller, the keyboard or the mouse (false: a plain text box, keyboard only)");
 #include <rex/kernel/xam/private.h>
 #include <rex/hook.h>
 #include <rex/input/input_system.h>
@@ -27,6 +30,7 @@ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
 #include <rex/thread.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
+#include <rex/ui/overlay/keyboard_prompt.h>
 #include <rex/ui/window.h>
 #include <rex/ui/windowed_app_context.h>
 
@@ -394,10 +398,51 @@ class KeyboardInputDialog : public XamDialog {
     rex::string::copy_truncating(text_buffer_.data(), default_text_, text_buffer_.size());
   }
 
+  // The on-screen keyboard (rex/ui/overlay/keyboard_prompt.h) in place of the text box: `max_units` the UTF-16 code
+  // units the game's buffer takes without its terminator. It reads every user's real controllers (the guest's input
+  // is blocked while a dialog is shown); the keyboard's pad is left out, since its keys are typed.
+  void UseVirtualKeyboard(std::string title, std::string description, size_t max_units) {
+    rex::ui::KeyboardPromptParams params;
+    params.title = std::move(title);
+    params.description = std::move(description);
+    params.text = default_text_;
+    params.max_units = max_units;
+    auto* runtime = REX_KERNEL_STATE()->emulator();
+    auto* input_system = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
+    if (input_system) {
+      params.read = [input_system](uint32_t user_index, rex::input::X_INPUT_GAMEPAD& gamepad) {
+        rex::input::X_INPUT_STATE state = {};
+        if (input_system->GetControllersForUI(user_index, &state) != X_ERROR_SUCCESS) {
+          return false;
+        }
+        gamepad = state.gamepad;
+        return true;
+      };
+    }
+    prompt_ = std::make_unique<rex::ui::KeyboardPrompt>(imgui_drawer(), std::move(params));
+  }
+
   const std::string& text() const { return text_; }
   bool cancelled() const { return cancelled_; }
 
   void OnDraw(ImGuiIO& io) override {
+    if (prompt_) {
+      switch (prompt_->Draw(io)) {
+        case rex::ui::KeyboardPrompt::Result::kOpen:
+          break;
+        case rex::ui::KeyboardPrompt::Result::kAccepted:
+          text_ = prompt_->text();
+          cancelled_ = false;
+          Close();
+          break;
+        case rex::ui::KeyboardPrompt::Result::kCancelled:
+          text_ = "";
+          cancelled_ = true;
+          Close();
+          break;
+      }
+      return;
+    }
     bool first_draw = false;
     if (!has_opened_) {
       ImGui::OpenPopup(title_.c_str());
@@ -447,6 +492,7 @@ class KeyboardInputDialog : public XamDialog {
   std::vector<char> text_buffer_;
   std::string text_ = "";
   bool cancelled_ = true;
+  std::unique_ptr<rex::ui::KeyboardPrompt> prompt_;
 };
 
 // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
@@ -512,10 +558,12 @@ u32 XamShowKeyboardUI_entry(u32 user_index, u32 flags, mapped_wstring default_te
 
     if (imgui_drawer) {
       uint32_t buffer_length_safe = buffer_length + 1;  // +1 for null terminator, just in case
-      result = xeXamDispatchDialogEx<KeyboardInputDialog>(
-          new KeyboardInputDialog(imgui_drawer, title_str, desc_str, def_text_str,
-                                  buffer_length_safe),
-          close, overlapped.guest_address());
+      auto* dialog =
+          new KeyboardInputDialog(imgui_drawer, title_str, desc_str, def_text_str, buffer_length_safe);
+      if (REXCVAR_GET(virtual_keyboard)) {
+        dialog->UseVirtualKeyboard(title_str, desc_str, buffer_length > 0 ? buffer_length - 1 : 0);
+      }
+      result = xeXamDispatchDialogEx<KeyboardInputDialog>(dialog, close, overlapped.guest_address());
     } else {
       // Fallback to headless
       auto run = [default_text, buffer, buffer_length, buffer_size]() -> X_RESULT {

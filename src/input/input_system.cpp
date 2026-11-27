@@ -764,6 +764,41 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_stat
   return X_ERROR_SUCCESS;
 }
 
+X_RESULT InputSystem::GetControllersForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
+  std::lock_guard lock(mutex_);
+  if (!assignment_ || !out_state) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  RefreshDevices();
+  std::vector<DeviceId> ids;
+  assignment_->DevicesForUser(user_index, ids);
+  X_INPUT_STATE merged = {};
+  bool any = false;
+  for (DeviceId id : ids) {
+    const DeviceInfo* info = DeviceInfoFor(id);
+    auto* driver = DriverForDevice(id);
+    // Not the keyboard's pad (the keys are typed) nor the stand-in for no controller.
+    if (!info || info->synthetic || !driver) {
+      continue;
+    }
+    X_INPUT_STATE state = {};
+    if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
+      continue;
+    }
+    if (!any) {
+      merged = state;
+      any = true;
+    } else {
+      MergeInto(merged, state);
+    }
+  }
+  if (!any) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  *out_state = merged;
+  return X_ERROR_SUCCESS;
+}
+
 void InputSystem::AddUIInputBlocker() {
   ui_input_blockers_.fetch_add(1);
 }
