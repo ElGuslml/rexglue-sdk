@@ -252,7 +252,7 @@ void ContentManager::ListContentPackages(uint32_t device_id, uint32_t title_id,
     names.insert(Lower(data.file_name()));
   }
   auto start = std::chrono::steady_clock::now();
-  size_t listed = 0, missing = 0, skipped = 0;
+  size_t listed = 0, missing = 0, skipped = 0, saved_games = 0;
   std::ifstream list(list_path, std::ios::binary);
   std::string line;
   while (std::getline(list, line)) {
@@ -265,9 +265,12 @@ void ContentManager::ListContentPackages(uint32_t device_id, uint32_t title_id,
       ++missing;
       continue;
     }
+    // Downloadable content, or a saved game the launcher lists for the game to read as downloadable content (Rock Band
+    // 2's songs exported from the first Rock Band: each a saved game of that title holding a song, as a song DLC).
     auto header = rex::filesystem::StfsContainerDevice::ReadPackageHeader(path);
-    if (!header || header->metadata.content_type != XContentType::kMarketplaceContent) {
-      REXSYS_WARN("Content package {} skipped: not downloadable content", line);
+    const bool saved_game = header && header->metadata.content_type == XContentType::kSavedGame;
+    if (!header || (header->metadata.content_type != XContentType::kMarketplaceContent && !saved_game)) {
+      REXSYS_WARN("Content package {} skipped: neither downloadable content nor a saved game", line);
       ++skipped;
       continue;
     }
@@ -293,9 +296,10 @@ void ContentManager::ListContentPackages(uint32_t device_id, uint32_t title_id,
     result.push_back(data);
     content_packages_[name] = path;
     ++listed;
+    saved_games += saved_game ? 1 : 0;
   }
-  REXSYS_INFO("Content packages: {} listed from {} ({} missing, {} skipped) in {:.1f} ms", listed,
-              rex::path_to_utf8(list_path), missing, skipped,
+  REXSYS_INFO("Content packages: {} listed from {} ({} of them saved games, {} missing, {} skipped) in {:.1f} ms",
+              listed, rex::path_to_utf8(list_path), saved_games, missing, skipped,
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 }
 
