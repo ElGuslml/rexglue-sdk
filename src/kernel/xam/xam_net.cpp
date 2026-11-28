@@ -225,10 +225,18 @@ u32 NetDll_XNetGetOpt_entry(u32 one, u32 option_id, mapped_void buffer_ptr,
 }
 
 u32 NetDll_XNetRandom_entry(u32 caller, mapped_void buffer_ptr, u32 length) {
-  // For now, constant values.
-  // This makes replicating things easier.
-  std::memset(buffer_ptr, 0xBB, length);
-
+  // Random bytes, as the console gives. Xenia filled the buffer with 0xBB ("constant values: this makes replicating
+  // things easier"), so every caller got the same bytes: The Beatles: Rock Band makes its users' GUIDs from them, its
+  // pool of remote users then matched the local player's band slot, and its song list waited for their song sync
+  // forever (an empty screen after the band's Start in Quickplay).
+  if (!buffer_ptr || !length) {
+    return 0;
+  }
+  std::random_device random;
+  auto* bytes = static_cast<uint8_t*>(static_cast<void*>(buffer_ptr));
+  for (u32 i = 0; i < length; ++i) {
+    bytes[i] = uint8_t(random());
+  }
   return 0;
 }
 
